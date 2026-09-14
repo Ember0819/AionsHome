@@ -207,6 +207,45 @@ class WeChatBindingTests(unittest.TestCase):
 
 
 class OpenClawRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_repairs_saved_rebinding_without_enabling_disabled_mode(self):
+        from wechat_bridge import create_wechat_binding
+        from wechat_mode import find_wechat_mode_for_sender, set_wechat_mode
+        from wechat_openclaw_runtime import OpenClawWeixinBridgeRuntime
+
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                settings = {}
+                create_wechat_binding(
+                    source_type="chatroom", source_id="room-new", account_id="bot-1",
+                    wechat_user_id="peer-1", settings=settings, now=200,
+                )
+                set_wechat_mode(
+                    settings, account_id="bot-1", wechat_user_id="peer-1",
+                    inbound_route={"source_type": "chatroom", "source_id": "room-old"},
+                    outbound_routes=[
+                        {"source_type": "chatroom", "source_id": "room-old"},
+                        {"source_type": "aion_private", "source_id": "conv-1"},
+                    ],
+                    enabled=enabled, now=100,
+                )
+                save = AsyncMock()
+                runtime = OpenClawWeixinBridgeRuntime(
+                    settings=settings, save_settings=save, now=lambda: 300,
+                )
+                # Exercise startup reconciliation without starting network polling.
+                runtime._stopping.set()
+                await runtime._run_loop()
+                mode = find_wechat_mode_for_sender(settings, "bot-1", "peer-1")
+                self.assertEqual(mode["enabled"], enabled)
+                self.assertEqual(mode["inbound_route"]["source_id"], "room-new")
+                self.assertEqual(mode["outbound_routes"], [
+                    {"source_type": "chatroom", "source_id": "room-new"},
+                    {"source_type": "aion_private", "source_id": "conv-1"},
+                ])
+                save.assert_awaited_once()
+                await runtime._run_loop()
+                save.assert_awaited_once()
+
     def test_choose_latest_binding_route_prefers_most_recent_chatroom_or_private(self):
         from wechat_openclaw_runtime import choose_latest_binding_route
 

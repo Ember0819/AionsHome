@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from generation_control import spawn_generation_task
+
 import asyncio
 import inspect
 import json
@@ -780,7 +782,7 @@ async def record_music_request(
         source_id=source_id,
         source_message_id=source_message_id,
     )
-    asyncio.create_task(_refresh_new_netease_track(track_id))
+    spawn_generation_task(_refresh_new_netease_track(track_id))
     return track_id
 
 

@@ -15,6 +15,8 @@ from typing import Optional, List, Any
 from config import DEFAULT_MODEL, MODELS, load_worldbook, SETTINGS, UPLOADS_DIR, ALBUM_IMAGES_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR, resolve_model_key, resolve_model_transport_mode
 from database import get_db
 from ws import manager
+from generation_control import (cancellable, cancel_generation, generation_status, GenerationQueue, spawn_generation_task)
+from cancelled_reply import save_cancelled_replies
 from active_window_state import record_aion_private_active
 from ai_providers import stream_ai, CLI_STATUS_PREFIX, with_current_device_context
 from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding, format_recalled_memories_for_prompt
@@ -42,6 +44,7 @@ from wechat_bridge import (
 )
 from band_commands import process_band_vibration, with_band_vibration_attachment
 from hug_pillow_commands import process_hug_pillow_commands
+from pat_commands import process_pat_commands
 from app_supervision_ai import (
     queue_app_supervision_reply_command,
     broadcast_app_supervision_command,
@@ -979,7 +982,7 @@ async def _start_private_lounge_visit(
         except Exception:
             pass
 
-    asyncio.create_task(run())
+    spawn_generation_task(run())
     return friend.id
 
 # ── Pydantic 模型 ─────────────────────────────────
@@ -1255,18 +1258,28 @@ async def messages_around(conv_id: str, msg_id: str, limit: int = Query(25, ge=1
             result.append(d)
         return result
 
+async def _save_cancelled_reply(scope):
+    return await save_cancelled_replies(scope, _visible_ai_text)
+
+
 # ── 中止 AI 生成 ─────────────────────────────────
+@router.get("/api/conversations/{conv_id}/generation-status")
+async def get_generation_status(conv_id: str, generation_id: str = Query(..., max_length=128)):
+    return generation_status("private", conv_id, generation_id)
+
+
 @router.post("/api/conversations/{conv_id}/abort")
-async def abort_generation(conv_id: str):
-    """中止正在进行的 AI 生成任务"""
-    evt = active_generations.get(conv_id)
-    if evt:
-        evt.set()
-        return {"ok": True}
-    return {"ok": False, "error": "no active generation"}
+async def abort_generation(conv_id: str, generation_id: str | None = Query(None, max_length=128)):
+    # Older callers have no generation id; keep their event-based stop usable.
+    if not generation_id:
+        evt = active_generations.get(conv_id)
+        if evt:
+            evt.set()
+    return await cancel_generation("private", conv_id, generation_id)
 
 # ── 编辑重新发送（更新消息 + 删后续 + AI 重新回复） ──
 @router.post("/api/messages/{msg_id}/edit-resend")
+@cancellable("private", _save_cancelled_reply)
 async def edit_resend_message(msg_id: str, body: MsgEditResend):
     """编辑用户消息后重新发送：更新内容 → 删除后续消息 → AI 重新回复"""
     if body.client_id:
@@ -1443,7 +1456,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     ai_msg_id = f"msg_{int(time.time()*1000)}"
     usage_meta: dict = {}
 
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     # 取消事件
     cancel_event = asyncio.Event()
@@ -1507,16 +1520,20 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 for keyword in music_matches:
                     keyword = keyword.strip()
                     try:
-                        results = search_songs(keyword, limit=5)
+                        results = await asyncio.to_thread(search_songs, keyword, limit=5)
                         if results:
                             song = results[0]
-                            song["audio_url"] = get_audio_url(song["id"])
+                            song["audio_url"] = await asyncio.to_thread(get_audio_url, song["id"])
                             song["candidates"] = results[1:4]
                             music_cards.append(song)
                     except Exception:
                         pass
                 full_text = MUSIC_CMD_PATTERN.sub("", full_text).strip()
 
+            full_text = await process_pat_commands(
+                full_text, source_type="private", source_id=conv_id,
+                sender="aion", source_msg_id=ai_msg_id,
+            )
             full_text = await process_band_vibration(
                 full_text,
                 source_type="private",
@@ -1622,7 +1639,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                         await manager.broadcast(mt_data)
                         if expect:
                             from routes.moments import _trigger_ai_replies
-                            asyncio.create_task(_trigger_ai_replies(mt_id, exclude_author="aion"))
+                            spawn_generation_task(_trigger_ai_replies(mt_id, exclude_author="aion"))
 
             memory_matches = MEMORY_CMD_PATTERN.findall(full_text)
             if memory_matches:
@@ -1723,13 +1740,13 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 cam_data = {'type': 'cam_check', 'conv_id': conv_id, 'model_key': model_key, 'msg_id': ai_msg_id}
                 await _q.put(cam_data)
                 await manager.broadcast({"type": "cam_check", "data": cam_data})
-                asyncio.create_task(_delayed_cam_check(conv_id, model_key))
+                spawn_generation_task(_delayed_cam_check(conv_id, model_key))
 
             if poi_matches:
                 poi_data = {'type': 'poi_search', 'conv_id': conv_id, 'categories': poi_matches, 'msg_id': ai_msg_id}
                 await _q.put(poi_data)
                 await manager.broadcast({"type": "poi_search", "data": poi_data})
-                asyncio.create_task(perform_poi_check(conv_id, model_key, poi_matches))
+                spawn_generation_task(perform_poi_check(conv_id, model_key, poi_matches))
 
             if web_search_matches or web_extract_matches:
                 web_data = {
@@ -1742,19 +1759,19 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await _q.put(web_data)
                 await manager.broadcast({"type": "web_search", "data": web_data})
                 await _web_search_sys_msg(conv_id, web_search_matches, web_extract_matches, after_msg_id=ai_msg_id)
-                asyncio.create_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
+                spawn_generation_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
 
             if activity_n > 0:
                 activity_data = {'type': 'activity_check', 'conv_id': conv_id, 'n': activity_n, 'msg_id': ai_msg_id}
                 await _q.put(activity_data)
                 await manager.broadcast({"type": "activity_check", "data": activity_data})
-                asyncio.create_task(perform_activity_check(conv_id, model_key, activity_n))
+                spawn_generation_task(perform_activity_check(conv_id, model_key, activity_n))
 
             if video_call_triggered:
                 vc_data = {'type': 'video_call_incoming', 'conv_id': conv_id, 'msg_id': ai_msg_id}
                 await _q.put(vc_data)
                 await _video_call_incoming_sys_msg(conv_id)
-                asyncio.create_task(_delayed_video_call(vc_data))
+                spawn_generation_task(_delayed_video_call(vc_data))
 
             if music_cards:
                 music_data = {'type': 'music', 'msg_id': ai_msg_id, 'cards': music_cards}
@@ -1766,13 +1783,13 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 ig_data = {'type': 'image_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id, 'is_selfie': image_gen_is_selfie}
                 await _q.put(ig_data)
                 await manager.broadcast({"type": "image_gen_start", "data": ig_data})
-                asyncio.create_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
+                spawn_generation_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
 
             if song_gen_prompt:
                 sg_data = {'type': 'song_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id}
                 await _q.put(sg_data)
                 await manager.broadcast({"type": "song_gen_start", "data": sg_data})
-                asyncio.create_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
+                spawn_generation_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
 
             debug_data = {
                 "type": "debug",
@@ -1796,7 +1813,8 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
             import traceback
             traceback.print_exc()
         finally:
-            active_generations.pop(conv_id, None)
+            if active_generations.get(conv_id) is cancel_event:
+                active_generations.pop(conv_id, None)
             if tts_streamer:
                 try:
                     await tts_streamer.flush()
@@ -1804,7 +1822,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                     pass
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         while True:
@@ -1817,6 +1835,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
 
 # ── 发送消息 + AI 回复（SSE 流式） ────────────────
 @router.post("/api/conversations/{conv_id}/send")
+@cancellable("private", _save_cancelled_reply)
 async def send_message(conv_id: str, body: MsgCreate):
     # 记录最后发消息的客户端 ID
     if body.client_id:
@@ -1915,7 +1934,7 @@ async def send_message(conv_id: str, body: MsgCreate):
     # 语音消息处理：历史语音消息用转写文本替代音频文件，当前消息保留音频原件
     _process_voice_attachments_in_history(history)
 
-    # 即时哨兵：取最近实际对话用于状态更新 + 关键词提取
+    # 本地前置路由：取最近实际对话用于记忆查询
     # 语音消息此时 content 已包含转写文本，哨兵直接分析文本
     actual_recent = [m for m in history if m["role"] in ("user", "assistant")][-3:]
 
@@ -1991,7 +2010,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我了解当前的游戏状况了。"})
             inject_offset += 2
 
-    # 2. 即时哨兵 + 记忆召回（fast_mode 时跳过以加快语音聊天响应）
+    # 2. 本地前置路由 + 记忆召回（fast_mode 时跳过以加快语音聊天响应）
     recall_keywords_str = ""
     recalled = []
     detail_text = ""
@@ -2013,7 +2032,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到。"})
         inject_offset += 2
     else:
-        # ── 正常模式：完整 RAG 流程 ──
+        # ── 正常模式：本地路由 + 完整 RAG 流程 ──
         digest_result = await instant_digest(actual_recent)
         recall_keywords = digest_result.get("keywords", [])
         recall_keywords_str = "、".join(recall_keywords) if recall_keywords else ""
@@ -2092,7 +2111,7 @@ async def send_message(conv_id: str, body: MsgCreate):
     usage_meta: dict = {}
 
     # ── 后台任务 + SSE 转发：AI 生成和保存在后台任务中完成，即使客户端断开也不丢失 ──
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     # 取消事件
     cancel_event = asyncio.Event()
@@ -2161,16 +2180,20 @@ async def send_message(conv_id: str, body: MsgCreate):
                 for keyword in music_matches:
                     keyword = keyword.strip()
                     try:
-                        results = search_songs(keyword, limit=5)
+                        results = await asyncio.to_thread(search_songs, keyword, limit=5)
                         if results:
                             song = results[0]
-                            song["audio_url"] = get_audio_url(song["id"])
+                            song["audio_url"] = await asyncio.to_thread(get_audio_url, song["id"])
                             song["candidates"] = results[1:4]
                             music_cards.append(song)
                     except Exception:
                         pass
                 full_text = MUSIC_CMD_PATTERN.sub("", full_text).strip()
 
+            full_text = await process_pat_commands(
+                full_text, source_type="private", source_id=conv_id,
+                sender="aion", source_msg_id=ai_msg_id,
+            )
             full_text = await process_band_vibration(
                 full_text,
                 source_type="private",
@@ -2284,7 +2307,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                         await manager.broadcast(mt_data)
                         if expect:
                             from routes.moments import _trigger_ai_replies
-                            asyncio.create_task(_trigger_ai_replies(mt_id, exclude_author="aion"))
+                            spawn_generation_task(_trigger_ai_replies(mt_id, exclude_author="aion"))
 
             # 检测 [MEMORY:xxx] 记忆录入指令
             memory_matches = MEMORY_CMD_PATTERN.findall(full_text)
@@ -2431,14 +2454,14 @@ async def send_message(conv_id: str, body: MsgCreate):
                 cam_data = {'type': 'cam_check', 'conv_id': conv_id, 'model_key': model_key, 'msg_id': ai_msg_id}
                 await _q.put(cam_data)
                 await manager.broadcast({"type": "cam_check", "data": cam_data})
-                asyncio.create_task(_delayed_cam_check(conv_id, model_key))
+                spawn_generation_task(_delayed_cam_check(conv_id, model_key))
 
             # [POI_SEARCH] 搜索周边 → 携带结果自动追加一轮 Core 回复
             if poi_matches:
                 poi_data = {'type': 'poi_search', 'conv_id': conv_id, 'categories': poi_matches, 'msg_id': ai_msg_id}
                 await _q.put(poi_data)
                 await manager.broadcast({"type": "poi_search", "data": poi_data})
-                asyncio.create_task(perform_poi_check(conv_id, model_key, poi_matches))
+                spawn_generation_task(perform_poi_check(conv_id, model_key, poi_matches))
 
             if web_search_matches or web_extract_matches:
                 web_data = {
@@ -2451,21 +2474,21 @@ async def send_message(conv_id: str, body: MsgCreate):
                 await _q.put(web_data)
                 await manager.broadcast({"type": "web_search", "data": web_data})
                 await _web_search_sys_msg(conv_id, web_search_matches, web_extract_matches, after_msg_id=ai_msg_id)
-                asyncio.create_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
+                spawn_generation_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
 
             # [查看动态:n] 查看设备活动摘要 → 携带摘要自动追加一轮 Core 回复
             if activity_n > 0:
                 activity_data = {'type': 'activity_check', 'conv_id': conv_id, 'n': activity_n, 'msg_id': ai_msg_id}
                 await _q.put(activity_data)
                 await manager.broadcast({"type": "activity_check", "data": activity_data})
-                asyncio.create_task(perform_activity_check(conv_id, model_key, activity_n))
+                spawn_generation_task(perform_activity_check(conv_id, model_key, activity_n))
 
             # [视频电话] 延迟 10 秒后定向推送到最后发消息的客户端
             if video_call_triggered:
                 vc_data = {'type': 'video_call_incoming', 'conv_id': conv_id, 'msg_id': ai_msg_id}
                 await _q.put(vc_data)
                 await _video_call_incoming_sys_msg(conv_id)
-                asyncio.create_task(_delayed_video_call(vc_data))
+                spawn_generation_task(_delayed_video_call(vc_data))
 
             # 推送音乐卡片
             if music_cards:
@@ -2478,13 +2501,13 @@ async def send_message(conv_id: str, body: MsgCreate):
                 ig_data = {'type': 'image_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id, 'is_selfie': image_gen_is_selfie}
                 await _q.put(ig_data)
                 await manager.broadcast({"type": "image_gen_start", "data": ig_data})
-                asyncio.create_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
+                spawn_generation_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
 
             if song_gen_prompt:
                 sg_data = {'type': 'song_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id}
                 await _q.put(sg_data)
                 await manager.broadcast({"type": "song_gen_start", "data": sg_data})
-                asyncio.create_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
+                spawn_generation_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
 
             debug_data = {
                 "type": "debug",
@@ -2514,7 +2537,8 @@ async def send_message(conv_id: str, body: MsgCreate):
             import traceback
             traceback.print_exc()
         finally:
-            active_generations.pop(conv_id, None)
+            if active_generations.get(conv_id) is cancel_event:
+                active_generations.pop(conv_id, None)
             if tts_streamer:
                 try:
                     await tts_streamer.flush()
@@ -2522,7 +2546,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                     pass
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         """SSE 转发：从队列读取事件转发给客户端。客户端断开时生成器关闭，后台任务不受影响。"""
@@ -2675,7 +2699,7 @@ async def cam_check_trigger(body: CamCheckTrigger):
     if body.conv_id in _cam_check_active:
         return {"ok": False, "error": "cam check already in progress"}
     _cam_check_active.add(body.conv_id)
-    asyncio.create_task(_guarded_cam_check(body.conv_id, body.model_key))
+    spawn_generation_task(_guarded_cam_check(body.conv_id, body.model_key))
     return {"ok": True}
 
 async def _guarded_cam_check(conv_id: str, model_key: str):
@@ -2801,7 +2825,7 @@ async def _start_private_memory_search_if_requested(
         "queries": [request.query for request in requests],
         "msg_id": status_id,
     })
-    asyncio.create_task(
+    spawn_generation_task(
         perform_private_memory_search(
             conv_id,
             model_key,
@@ -3429,6 +3453,7 @@ async def perform_activity_check(conv_id: str, model_key: str, n: int = 6):
 
 # ── 重新生成 AI 回复 ──────────────────────────────
 @router.post("/api/conversations/{conv_id}/regenerate")
+@cancellable("private", _save_cancelled_reply)
 async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode: bool = False, fast_mode: bool = False, temperature: Optional[float] = None, max_tokens: Optional[int] = None, tts_enabled: bool = False, tts_voice: str = ""):
     async with get_db() as db:
         db.row_factory = __import__('aiosqlite').Row
@@ -3451,7 +3476,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     )
     _process_voice_attachments_in_history(history, keep_idx=last_user_idx)
 
-    # 即时哨兵：取最近实际对话用于状态更新 + 关键词提取
+    # 本地前置路由：取最近实际对话用于记忆查询
     actual_recent = [m for m in history if m["role"] in ("user", "assistant")][-3:]
 
     wb = load_worldbook()
@@ -3483,7 +3508,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         whisper_mode=whisper_mode,
     )
 
-    # 2. 即时哨兵 + 记忆召回（fast_mode 时跳过）
+    # 2. 本地前置路由 + 记忆召回（fast_mode 时跳过）
     recall_keywords_str = ""
     recalled = []
     detail_text = ""
@@ -3505,7 +3530,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到。"})
         inject_offset += 2
     else:
-        # ── 正常模式：完整 RAG 流程 ──
+        # ── 正常模式：本地路由 + 完整 RAG 流程 ──
         digest_result = await instant_digest(actual_recent)
         recall_keywords = digest_result.get("keywords", [])
         recall_keywords_str = "、".join(recall_keywords) if recall_keywords else ""
@@ -3575,7 +3600,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     usage_meta: dict = {}
 
     # ── 后台任务 + SSE 转发：AI 生成和保存在后台任务中完成，即使客户端断开也不丢失 ──
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     # 取消事件
     cancel_event = asyncio.Event()
@@ -3643,16 +3668,20 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 for keyword in music_matches:
                     keyword = keyword.strip()
                     try:
-                        results = search_songs(keyword, limit=5)
+                        results = await asyncio.to_thread(search_songs, keyword, limit=5)
                         if results:
                             song = results[0]
-                            song["audio_url"] = get_audio_url(song["id"])
+                            song["audio_url"] = await asyncio.to_thread(get_audio_url, song["id"])
                             song["candidates"] = results[1:4]
                             music_cards.append(song)
                     except Exception:
                         pass
                 full_text = MUSIC_CMD_PATTERN.sub("", full_text).strip()
 
+            full_text = await process_pat_commands(
+                full_text, source_type="private", source_id=conv_id,
+                sender="aion", source_msg_id=ai_msg_id,
+            )
             full_text = await process_band_vibration(
                 full_text,
                 source_type="private",
@@ -3766,7 +3795,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                         await manager.broadcast(mt_data)
                         if expect:
                             from routes.moments import _trigger_ai_replies
-                            asyncio.create_task(_trigger_ai_replies(mt_id, exclude_author="aion"))
+                            spawn_generation_task(_trigger_ai_replies(mt_id, exclude_author="aion"))
 
             # 检测 [MEMORY:xxx] 记忆录入指令
             memory_matches = MEMORY_CMD_PATTERN.findall(full_text)
@@ -3865,14 +3894,14 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 cam_data = {'type': 'cam_check', 'conv_id': conv_id, 'model_key': model_key, 'msg_id': ai_msg_id}
                 await _q.put(cam_data)
                 await manager.broadcast({"type": "cam_check", "data": cam_data})
-                asyncio.create_task(_delayed_cam_check(conv_id, model_key))
+                spawn_generation_task(_delayed_cam_check(conv_id, model_key))
 
             # [POI_SEARCH] 搜索周边 → 携带结果自动追加一轮 Core 回复
             if poi_matches:
                 poi_data = {'type': 'poi_search', 'conv_id': conv_id, 'categories': poi_matches, 'msg_id': ai_msg_id}
                 await _q.put(poi_data)
                 await manager.broadcast({"type": "poi_search", "data": poi_data})
-                asyncio.create_task(perform_poi_check(conv_id, model_key, poi_matches))
+                spawn_generation_task(perform_poi_check(conv_id, model_key, poi_matches))
 
             if web_search_matches or web_extract_matches:
                 web_data = {
@@ -3885,21 +3914,21 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 await _q.put(web_data)
                 await manager.broadcast({"type": "web_search", "data": web_data})
                 await _web_search_sys_msg(conv_id, web_search_matches, web_extract_matches, after_msg_id=ai_msg_id)
-                asyncio.create_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
+                spawn_generation_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
 
             # [查看动态:n] 查看设备活动摘要 → 携带摘要自动追加一轮 Core 回复
             if activity_n > 0:
                 activity_data = {'type': 'activity_check', 'conv_id': conv_id, 'n': activity_n, 'msg_id': ai_msg_id}
                 await _q.put(activity_data)
                 await manager.broadcast({"type": "activity_check", "data": activity_data})
-                asyncio.create_task(perform_activity_check(conv_id, model_key, activity_n))
+                spawn_generation_task(perform_activity_check(conv_id, model_key, activity_n))
 
             # [视频电话] 延迟 10 秒后定向推送到最后发消息的客户端
             if video_call_triggered:
                 vc_data = {'type': 'video_call_incoming', 'conv_id': conv_id, 'msg_id': ai_msg_id}
                 await _q.put(vc_data)
                 await _video_call_incoming_sys_msg(conv_id)
-                asyncio.create_task(_delayed_video_call(vc_data))
+                spawn_generation_task(_delayed_video_call(vc_data))
 
             # 推送音乐卡片
             if music_cards:
@@ -3912,13 +3941,13 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 ig_data = {'type': 'image_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id, 'is_selfie': image_gen_is_selfie}
                 await _q.put(ig_data)
                 await manager.broadcast({"type": "image_gen_start", "data": ig_data})
-                asyncio.create_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
+                spawn_generation_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
 
             if song_gen_prompt:
                 sg_data = {'type': 'song_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id}
                 await _q.put(sg_data)
                 await manager.broadcast({"type": "song_gen_start", "data": sg_data})
-                asyncio.create_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
+                spawn_generation_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
 
             debug_data = {
                 "type": "debug",
@@ -3942,7 +3971,8 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             import traceback
             traceback.print_exc()
         finally:
-            active_generations.pop(conv_id, None)
+            if active_generations.get(conv_id) is cancel_event:
+                active_generations.pop(conv_id, None)
             if regen_tts:
                 try:
                     await regen_tts.flush()
@@ -3950,7 +3980,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                     pass
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         """SSE 转发：从队列读取事件转发给客户端。客户端断开时生成器关闭，后台任务不受影响。"""

@@ -10,11 +10,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#050923">
-<link rel="stylesheet" href="/static/chatroom.css?v=monologue-speaker-colors-soft-20260905">
+<link rel="stylesheet" href="/static/chatroom.css?v=compact-settings-20260912">
+<link rel="stylesheet" href="/static/pat.css?v=inline-order-20260910">
 <link rel="stylesheet" href="/static/memory-editor.css?v=20260905">
 <link rel="stylesheet" href="/static/proactive-orbit.css?v=20260817f">
 <link rel="stylesheet" href="/static/taobao-card.css?v=20260831-bubble-aligned">
 <link rel="stylesheet" href="/static/voice-call.css?v=voice-call-polish-20260704g">
+<link rel="stylesheet" href="/static/chat-font-size.css?v=20260912">
 </head>
 <body>
   <div class="app">
@@ -55,7 +57,7 @@
     <div class="chat-area" id="chatArea">
       <div class="chat-header">
         <button class="menu-btn" id="menuBtn">☰</button>
-        <div class="room-title" id="roomTitle">聊天室</div>
+        <button type="button" class="room-title" id="roomTitle" onclick="renameCurrentRoom()" title="点击修改房间名称" aria-label="修改房间名称">聊天室</button>
         <div class="header-actions" id="headerActions">
           <button class="reply-once-btn aion" id="replyAionBtn" onclick="triggerReplyOnce('aion')" style="display:none">AI 说</button>
           <button class="reply-once-btn connor" id="replyConnorBtn" onclick="triggerReplyOnce('connor')" style="display:none">第二AI 说</button>
@@ -145,9 +147,11 @@
         <button class="close-btn" onclick="closeSettings()">✕</button>
       </div>
       <div class="panel-body">
-        <div class="field">
-          <label>房间名称</label>
-          <input id="setTitle" type="text">
+        <div class="chat-font-size-control" data-chat-font-size role="group" aria-label="聊天字号">
+          <span>聊天字号</span>
+          <button type="button" data-font-decrease aria-label="缩小聊天字号" title="缩小字号">A−</button>
+          <output aria-live="polite">13.5</output>
+          <button type="button" data-font-increase aria-label="放大聊天字号" title="放大字号">A+</button>
         </div>
         <div class="settings-inline-row">
           <div class="field">
@@ -168,6 +172,7 @@
             <option value="manual">指定回复</option>
           </select>
         </div>
+        <div class="settings-inline-row settings-model-row">
         <div class="field" id="fieldAionModel">
           <label>AI 模型线路</label>
           <select id="setAionModel"></select>
@@ -176,21 +181,24 @@
           <label>第二AI 模型线路</label>
           <select id="setConnorModel"></select>
         </div>
+        </div>
         <div class="settings-section-compact">
           <div class="field tts-toggle-row">
-            <span>语音合成 (TTS)</span>
+            <span>语音播放</span>
             <label class="toggle-switch">
               <input type="checkbox" id="setTtsEnabled" onchange="onTtsToggleChange()">
               <span class="toggle-slider"></span>
             </label>
           </div>
-          <div class="field">
+          <div class="settings-inline-row settings-voice-row">
+          <div class="field" id="fieldAionVoice">
             <label>AI 音色</label>
             <select id="setTtsAionVoice"></select>
           </div>
           <div class="field">
             <label>第二位 AI 音色</label>
             <select id="setTtsConnorVoice"></select>
+          </div>
           </div>
         </div>
         <div class="settings-section-compact ambient-voice-settings">
@@ -201,6 +209,9 @@
               <span class="toggle-slider"></span>
             </label>
           </div>
+          <details class="settings-fold ambient-settings-fold">
+            <summary>侦听细项<span class="fold-hint">唤醒词 · 检查频率</span></summary>
+          <div class="settings-inline-row">
           <div class="field">
             <label>唤醒词</label>
             <input id="setAmbientWakeWord" type="text" placeholder="现在立刻唤醒" onchange="crSaveAmbientVoiceSettings()">
@@ -208,6 +219,7 @@
           <div class="field">
             <label>结束词</label>
             <input id="setAmbientStopWord" type="text" placeholder="结束立刻唤醒" onchange="crSaveAmbientVoiceSettings()">
+          </div>
           </div>
           <div class="settings-inline-row">
             <div class="field">
@@ -229,7 +241,10 @@
             </div>
             <div class="ambient-buffer-preview empty" id="crAmbientBufferPreview">暂无待检查片段</div>
           </div>
+          </details>
         </div>
+      </div>
+      <div class="settings-panel-footer">
         <button class="save-btn" id="saveSettingsBtn" onclick="saveSettings()">保存</button>
       </div>
     </div>
@@ -440,6 +455,8 @@
   <script src="/static/hug_pillow_ai.js?v=hug-pillow-ai-20260726"></script>
   <script src="/static/monitor-camera-snapshot.js?v=20260902-compact"></script>
   <script src="/static/system-notice-ui.js?v=20260902"></script>
+  <link rel="stylesheet" href="/static/repair-result-card.css">
+  <script src="/static/repair-result-card.js"></script>
   <script src="/static/schedule-command-filter.js?v=20260805-next-chat-20260816"></script>
   <script src="/static/lounge-visit-ui.js?v=20260815"></script>
   <script src="/static/proactive-orbit.js?v=20260816"></script>
@@ -447,10 +464,13 @@
   <script src="/static/taobao-card.js?v=20260831-compact"></script>
   <script src="/static/native-tts-audio.js?v=20260903-mix"></script>
   <script src="/static/vendor/markdown-it-15.0.1.min.js?v=15.0.1"></script>
-  <script src="/static/chatroom-markdown.js?v=user-markdown-bubbles-20260904"></script>
+  <script src="/static/chatroom-markdown.js?v=chinese-strong-20260906"></script>
   <script src="/static/message-row-focus.js?v=20260904-editor-focus"></script>
   <script src="/static/memory-editor.js?v=20260905"></script>
-  <script src="/static/chatroom.js?v=network-sync-20260905"></script>
+  <script src="/static/pat.js?v=inline-order-20260910"></script>
+  <script src="/static/generation-control.js?v=stop-20260908"></script>
+  <script src="/static/chat-font-size.js?v=20260912"></script>
+<script src="/static/chatroom.js?v=compact-settings-20260912"></script>
   <script src="/static/voice-call-policy.js?v=voice-latency-20260902a"></script>
   <script src="/static/voice-call.js?v=voice-latency-20260902a"></script>
 </body>

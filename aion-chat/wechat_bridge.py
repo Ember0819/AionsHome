@@ -297,6 +297,9 @@ def create_wechat_binding(
         ):
             bindings.pop(old_key, None)
     bindings[key] = binding
+    from wechat_mode import sync_wechat_mode_binding
+
+    sync_wechat_mode_binding(store, binding, now=current)
     _save_if_global(settings)
     return dict(binding)
 

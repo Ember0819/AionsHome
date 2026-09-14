@@ -20,7 +20,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from config import DB_PATH
 
 DEFAULT_SETTINGS = {"transport": "native_bridge", "url": "http://127.0.0.1:3654/mcp", "autonomy_enabled": True}
-SHOPPING_LOCK = asyncio.Lock()  # Native searches share the desktop app's active page.
+SHOPPING_LOCK = asyncio.Lock()  # Keep searches and independent shopping trips serialized.
 ACTIVE_TRIPS: dict[str, dict] = {}
 
 
@@ -263,7 +263,7 @@ def tool_payload(result):
     if isinstance(data, dict) and isinstance(data.get("result"), dict):
         data = data["result"]
     if not isinstance(data, dict) or not isinstance(data.get("products"), list):
-        raise RuntimeError("MCP 未返回商品列表，请检查淘宝登录或验证提示")
+        raise RuntimeError("MCP 未返回商品列表，请检查淘宝搜索服务")
     return data
 
 
@@ -274,7 +274,7 @@ async def check_connection(settings):
         if "search_products" not in names:
             raise RuntimeError("该 MCP 服务没有 search_products 工具")
         return {"ok": True, "transport": settings["transport"], "tools": ["search_products"],
-                "message": "MCP 工具握手成功；登录及搜索能力仍以实际搜索为准"}
+                "message": "MCP 工具握手成功；商品能力以实际搜索为准"}
     except Exception as exc:
         raise RuntimeError("MCP 连接检查失败：" + _error_message(exc)) from exc
 
@@ -294,8 +294,6 @@ async def search_and_record(store: TaobaoStore, keyword: str):
         raise ValueError("搜索词应为 1 到 120 字")
     settings = await store.settings()
     payload = await mcp_search(keyword, settings)
-    # The desktop client can return an empty list on its first search after
-    # sitting idle; the same query succeeds once its page has loaded.
     # Retry only a genuinely empty response, not rejected links or MCP errors.
     if not payload["products"]:
         await asyncio.sleep(2)

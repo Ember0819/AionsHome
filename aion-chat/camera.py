@@ -10,7 +10,7 @@ import cv2, httpx, numpy as np, aiosqlite
 
 from config import (
     DB_PATH, SCREENSHOTS_DIR, MONITOR_LOGS_DIR,
-    get_key, get_sentinel_config, load_worldbook, load_chat_status, load_cam_config,
+    get_key, get_sentinel_config, load_worldbook, load_cam_config,
     normalize_camera_wake_mode, save_cam_config, DEFAULT_MODEL, SETTINGS,
     resolve_model_transport_mode,
 )
@@ -1335,9 +1335,6 @@ class CameraMonitor:
             log_lines = [f"[{e.get('time','')}] {e.get('monitoringlog','')}" for e in recent_logs[-20:]]
             log_history = "\n".join(log_lines)
 
-        chat_status_data = load_chat_status()
-        chat_status_text = chat_status_data.get("status", "")
-
         # 获取位置信息
         location_text = ""
         try:
@@ -1396,7 +1393,6 @@ class CameraMonitor:
 
 当前时间：{now_str}
 {user_name}最后一次和你聊天的时间：{last_user_time_str}
-{user_name}最后的聊天状态：{chat_status_text if chat_status_text else "（暂无）"}
 {(chr(10) + location_text) if location_text else ""}
 
 最近的聊天记录：
@@ -1425,8 +1421,8 @@ class CameraMonitor:
         - device_activity: 只允许来自DEVICE CONTEXT和设备使用动态；不能包含“人在桌前/在床上”等身体位置结论。
         - inference: 可以综合上下文，但必须标明不确定性，不能把设备活动当作身体位置证据。
         - confidence: high表示画面清楚；medium表示可见但有遮挡；low表示昏暗/遮挡/边界不清。
-        - monitoringlog: 结合当前时间和画面的客观描述，禁止胡编猜测。没有看到人就说没看到，如果最后状态没有说去睡觉，则不能推测{user_name}可能去睡觉了。身体位置必须来自CAMERA VIEW，设备动态只能补充。
-        - summary: 综合最后的聊天状态和上下文内容，概括{user_name}这段时间的整体状态变化和关键事件，禁止胡编猜测。{user_name}
+        - monitoringlog: 结合当前时间和画面的客观描述，禁止胡编猜测。没有看到人就说没看到，如果最近聊天没有说去睡觉，则不能推测{user_name}可能去睡觉了。身体位置必须来自CAMERA VIEW，设备动态只能补充。
+        - summary: 综合最近聊天记录和上下文内容，概括{user_name}这段时间的整体状态变化和关键事件，禁止胡编猜测。{user_name}
         - call_core: 判断是否需要主动联系{user_name}
         - core_reason: 仅当call_core为true时填写，说明为什么要主动联系{user_name}，让核心模型了解情况
 
@@ -1438,12 +1434,17 @@ class CameraMonitor:
 
         img_b64 = base64.b64encode(filepath.read_bytes()).decode()
         scfg = get_sentinel_config()
-        if not scfg["api_key"]:
-            print("[Monitor] 哨兵模型 API Key 未配置，跳过分析")
+        if not scfg.get("ready"):
+            print("[Monitor] 哨兵模型未就绪，跳过分析")
             return
 
         sentinel_model = scfg["model"]
-        print(f"[Monitor] 正在调用 Sentinel 模型: {sentinel_model} ({'OpenAI兼容' if scfg['use_openai'] else 'Gemini'})")
+        provider_label = {
+            "codex": "Codex 登录态",
+            "openai_compatible": "OpenAI兼容",
+            "gemini": "Gemini",
+        }.get(scfg.get("provider"), "未知线路")
+        print(f"[Monitor] 正在调用 Sentinel 模型: {sentinel_model} ({provider_label})")
 
         monitoring_log = ""
         call_core = False

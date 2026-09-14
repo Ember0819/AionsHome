@@ -1,5 +1,5 @@
 """
-向量记忆库：embedding、recall、手动总结、即时哨兵（RAG 路由）
+向量记忆库：embedding、recall、手动总结、本地前置路由
 """
 
 import json, time, struct, math, asyncio, re
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import aiosqlite, httpx
 
-from config import get_key, get_sentinel_config, get_embedding_config, load_worldbook, save_chat_status, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL
+from config import get_key, get_sentinel_config, get_embedding_config, load_worldbook, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL
 from database import get_db
 from model_json import extract_json_object
 from ws import manager
@@ -566,7 +566,14 @@ def _extract_gemini_final_text(data: dict) -> str:
 
 async def _call_sentinel_text(scfg: dict, prompt: str, timeout: int = 60) -> str | None:
     """统一调用哨兵模型（纯文本），支持 Gemini 原生和 OpenAI 兼容格式"""
-    if scfg["use_openai"]:
+    if scfg.get("provider") == "codex":
+        from ai_providers import call_codex_sentinel
+        return await call_codex_sentinel(
+            prompt,
+            model=scfg.get("model") or "gpt-5.6-luna",
+            timeout=timeout,
+        )
+    if scfg.get("use_openai"):
         url = f"{scfg['base_url']}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {scfg['api_key']}", "Content-Type": "application/json"}
         payload = {
@@ -602,7 +609,16 @@ async def _call_sentinel_text(scfg: dict, prompt: str, timeout: int = 60) -> str
 
 async def _call_sentinel_vision(scfg: dict, prompt: str, img_b64: str, mime_type: str = "image/jpeg", timeout: int = 60) -> str | None:
     """统一调用哨兵模型（带图片），支持 Gemini 原生和 OpenAI 兼容格式"""
-    if scfg["use_openai"]:
+    if scfg.get("provider") == "codex":
+        from ai_providers import call_codex_sentinel
+        return await call_codex_sentinel(
+            prompt,
+            model=scfg.get("model") or "gpt-5.6-luna",
+            image_b64=img_b64,
+            mime_type=mime_type,
+            timeout=timeout,
+        )
+    if scfg.get("use_openai"):
         url = f"{scfg['base_url']}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {scfg['api_key']}", "Content-Type": "application/json"}
         payload = {
@@ -642,7 +658,7 @@ async def _call_sentinel_vision(scfg: dict, prompt: str, img_b64: str, mime_type
             return _extract_gemini_final_text(data)
 
 
-# ── 即时哨兵：每次用户发消息后触发（RAG 路由） ────
+# ── 本地前置路由：每次用户发消息后触发（不调用模型） ────
 _MEMORY_REFERENCE_RE = re.compile(
     r"(昨天|前天|上次|之前|以前|刚才|那天|前几天|还记得|记不记得|"
     r"看过|听过|说过|聊过|讲过|做过|吃过|买过|去过)"
@@ -650,6 +666,10 @@ _MEMORY_REFERENCE_RE = re.compile(
 _DETAIL_REQUEST_RE = re.compile(
     r"(讲的啥|讲什么|说的啥|叫什么|叫啥|名字|细节|具体|哪|什么|怎么|为什么|大概|内容)"
 )
+_FRONT_ROUTE_NEGATIONS = (
+    "不是", "不要", "别让", "不让", "别叫", "别问", "不用", "不必",
+)
+_FRONT_ROUTE_SPEAK_ACTION = r"(?:先|优先)(?:来)?(?:说|回答|回复|讲|答)"
 
 
 def _latest_user_text(recent_messages: list[dict]) -> str:
@@ -661,207 +681,101 @@ def _latest_user_text(recent_messages: list[dict]) -> str:
     return ""
 
 
-def _fallback_digest_topic(text: str, keywords: list[str]) -> str:
-    keyword_text = "、".join(str(k).strip() for k in (keywords or []) if str(k).strip())
-    if keyword_text:
-        return f"当前话题：{keyword_text}"
-    text = re.sub(r"\s+", " ", str(text or "")).strip()
-    text = re.sub(r"\[\[image:[^\]]+\]\]", "", text).strip()
-    if not text:
-        return "当前对话的记忆线索"
-    if _MEMORY_REFERENCE_RE.search(text):
-        return "询问过往对话或经历中的具体内容"
-    return "当前闲聊话题"
+def _local_front_topic(text: str) -> str:
+    """Use the user's own words as the vector-recall query."""
+    cleaned = re.sub(r"\[\[image:[^\]]+\]\]", "", str(text or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:200] or "当前对话"
 
 
-_GROUP_ROUTING_META_PHRASES = (
-    "first_responder",
-    "优先回复对象",
-    "回复判断",
-    "回复路由",
-    "哨兵判断",
-    "查询优化路由",
-    "谁先回复",
-    "由谁先回复",
-    "下一条ai回复",
-    "下一条 AI 回复",
-    "发言顺序",
-)
+def _front_route_is_negated(text: str, start: int) -> bool:
+    prefix = text[max(0, start - 8):start]
+    return any(marker in prefix for marker in _FRONT_ROUTE_NEGATIONS)
 
 
-def _sanitize_group_recall_fields(
-    topic: str,
-    keywords: list[str],
-    participant_names: dict[str, str],
-    latest_user: str,
-) -> tuple[str, list[str]]:
-    """Keep group reply-routing metadata out of vector recall inputs."""
-    blocked_names = {
-        str(participant_names.get(key) or "").strip()
-        for key in ("user", "aion", "connor")
-    }
-    blocked_names.update({"aion", "connor"})
-    blocked_names.discard("")
+def _front_route_mentions(text: str, name: str) -> list[int]:
+    if not name:
+        return []
+    return [
+        match.start()
+        for match in re.finditer(re.escape(name), text, flags=re.IGNORECASE)
+        if not _front_route_is_negated(text, match.start())
+    ]
 
-    def _contains_blocked_name(text: str) -> bool:
-        lowered = text.casefold()
-        return any(name.casefold() in lowered for name in blocked_names)
 
-    cleaned_keywords = []
-    for keyword in keywords or []:
-        value = str(keyword or "").strip()
-        lowered = value.casefold()
-        if not value or _contains_blocked_name(value):
-            continue
-        if value == "哨兵" or any(phrase.casefold() in lowered for phrase in _GROUP_ROUTING_META_PHRASES):
-            continue
-        cleaned_keywords.append(value)
-
-    topic_text = str(topic or "").strip()
-    topic_lowered = topic_text.casefold()
-    has_routing_meta = any(
-        phrase.casefold() in topic_lowered
-        for phrase in _GROUP_ROUTING_META_PHRASES
+def _front_route_explicit_orders(text: str, name: str) -> list[int]:
+    if not name:
+        return []
+    escaped = re.escape(name)
+    patterns = (
+        rf"{escaped}(?:老公)?\s*{_FRONT_ROUTE_SPEAK_ACTION}",
+        rf"(?:先|优先)\s*(?:让|请|叫)?\s*{escaped}(?:老公)?(?:来)?(?:说|回答|回复|讲|答)?",
     )
-    if has_routing_meta:
-        topic_text = ""
-    else:
-        for name in sorted(blocked_names, key=len, reverse=True):
-            topic_text = re.sub(re.escape(name), "", topic_text, flags=re.IGNORECASE)
-        topic_text = re.sub(r"[\s、,，;；:：/|]+", " ", topic_text).strip(" -—_")
+    starts = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            name_match = re.search(escaped, match.group(0), flags=re.IGNORECASE)
+            name_start = match.start() + (name_match.start() if name_match else 0)
+            if not _front_route_is_negated(text, name_start):
+                starts.append(match.start())
+    return starts
 
-    if not topic_text:
-        topic_text = _fallback_digest_topic(latest_user, cleaned_keywords)
-    return topic_text, cleaned_keywords
+
+def _resolve_local_first_responder(
+    latest_user: str,
+    participant_names: dict[str, str] | None,
+) -> str:
+    """Resolve explicit group-chat addressing without waiting for an LLM."""
+    if not participant_names:
+        return "random"
+
+    names = {
+        "aion": str(participant_names.get("aion") or "").strip(),
+        "connor": str(participant_names.get("connor") or "").strip(),
+    }
+    ordered = []
+    for actor, name in names.items():
+        ordered.extend(
+            (start, actor)
+            for start in _front_route_explicit_orders(latest_user, name)
+        )
+    if ordered:
+        actors = {actor for _, actor in ordered}
+        if len(actors) == 1:
+            return next(iter(actors))
+        return min(ordered)[1]
+
+    mentioned = [
+        actor
+        for actor, name in names.items()
+        if _front_route_mentions(latest_user, name)
+    ]
+    return mentioned[0] if len(mentioned) == 1 else "random"
 
 
 async def instant_digest(
     recent_messages: list[dict],
     group_participants: dict[str, str] | None = None,
 ) -> dict:
-    """
-    用户每次发消息后即时调用 flash-lite，返回结构化 JSON：
-    {is_search_needed, keywords, require_detail, status, topic, first_responder}
-
-    group_participants 仅在群聊传入，键为 user/aion/connor，值为动态配置的显示名。
-    此时 first_responder 返回 aion/connor/random，用于决定本轮谁先回复。
-    """
-    gemini_key = get_key("gemini_free")
-    scfg = get_sentinel_config()
-    if not scfg["api_key"] or not recent_messages:
+    """Build the per-message recall and reply route locally, without an LLM call."""
+    if not recent_messages:
         return {
             "is_search_needed": False, "keywords": [], "require_detail": False,
             "status": "", "topic": "", "first_responder": "random",
         }
 
-    wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
-    ai_name = wb.get("ai_name", "AI")
-
-    participant_names = group_participants or {}
-
-    def _speaker_label(message: dict) -> str:
-        sender = str(message.get("sender") or "").strip().lower()
-        if sender and sender in participant_names:
-            return participant_names[sender]
-        return user_name if message.get("role") == "user" else ai_name
-
-    messages_text = "\n".join(
-        f"{_speaker_label(m)}: {str(m.get('content') or '')[:200]}"
-        for m in recent_messages
-    )
-
-    responder_instruction = ""
-    if group_participants:
-        group_ai_name = participant_names.get("aion") or ai_name
-        group_connor_name = participant_names.get("connor") or "另一位AI"
-        responder_instruction = (
-            f'7. "first_responder": 只根据最新一条用户消息判断下一条应由谁先回复。'
-            f'明确在问或点名“{group_ai_name}”就填"aion"，'
-            f'明确在问或点名“{group_connor_name}”就填"connor"；'
-            f'同时问两人、没有明确对象或拿不准就填"random"。注意否定语义。\n'
-        )
-
-    prompt = (
-        f"你是一个 RAG 系统的查询优化路由。分析用户输入，输出 JSON：\n"
-        f"1. 忽略高频对话称呼：不要提取对话者的名字或昵称（如 \"{ai_name}\", \"{user_name}\", \"亲爱的\", \"老公\", \"宝贝\"）作为关键词。\n"
-        f"2. 忽略高频常用词：如\"晚安故事\",\"吃什么\"等。\n"
-        f"3. 聚焦核心实体：只提取稀缺的、具有区分度的名词（地点、物品、特定事件、专有名词等）\n"
-        f"4. 判断召回记忆后是否需要附带对应的历史原文。记忆摘要每轮都会搜索；只要用户在问过去发生/看过/聊过/吃过/做过/提过的内容，或需要你回忆上下文事实，is_search_needed 必须为 true。\n"
-        f"   \"is_search_needed\": Boolean.\n"
-        f"      - false: 只召回并携带相关记忆摘要，不附带其历史原文。\n"
-        f"      - true: 除相关记忆摘要外，还附带对应的历史原文；出现“昨天/前天/上次/之前/刚才/那天/看过/聊过/吃过/叫什么/讲的啥/还记得”等过去线索或事实追问时必须为 true。\n"
-        f"   \"keywords\": 提取 2-5 个搜索关键词（过滤掉 {ai_name}, {user_name} 等高频人名）。如果没有专名，也要提取当前问题里的对象词、事件类型词或行为词，不要编造对话里没出现的词。\n"
-        f"   \"require_detail\": Boolean.\n"
-        f"      - false: 模糊回忆/情感抒发（只需读取摘要）。\n"
-        f"      - true: 当询问具体事实/细节/名字/剧情/步骤/时间线（需要读取正文）时为 true，例如“前天看的电影讲的啥”“那个叫什么”“具体怎么说的”。\n"
-        f"5. \"status\": 结合上下文总结{user_name}当前所处的状态（如：{user_name}刚吃完晚饭准备出门、洗完澡准备睡觉、回到家开始工作了等）。\n"
-        f"6. \"topic\": 必须输出一个 8-40 字的检索话题摘要，永远不要留空。不要复制整句原话；要概括成短查询，例如“询问某次看过内容的剧情”“回忆之前提到的食物”等。\n\n"
-        f"{responder_instruction}"
-        f"严格只输出一个 JSON 对象，不要输出任何其他内容。\n\n"
-        f"对话：\n{messages_text}"
-    )
-
-    try:
-        raw = await _call_sentinel_text(scfg, prompt, timeout=15)
-        if not raw:
-            return {
-                "is_search_needed": False, "keywords": [], "require_detail": False,
-                "status": "", "topic": "", "first_responder": "random",
-            }
-
-        # 提取 JSON（可能包裹在 ```json ... ``` 中）
-        if "```" in raw:
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                raw = raw[start:end]
-
-        result = json.loads(raw)
-        is_search = bool(result.get("is_search_needed", False))
-        keywords = result.get("keywords", [])
-        if isinstance(keywords, str):
-            keywords = [k.strip() for k in keywords.replace("、", ",").split(",") if k.strip()]
-        require_detail = bool(result.get("require_detail", False))
-        status = str(result.get("status", "")).strip()
-        first_responder = str(result.get("first_responder", "random")).strip().lower()
-        if first_responder not in ("aion", "connor"):
-            first_responder = "random"
-
-        if status:
-            save_chat_status(status)
-            await manager.broadcast({"type": "chat_status", "data": {"status": status, "updated_at": time.time()}})
-
-        topic = str(result.get("topic", "")).strip()
-        latest_user = _latest_user_text(recent_messages)
-        if group_participants:
-            topic, keywords = _sanitize_group_recall_fields(
-                topic,
-                keywords,
-                participant_names,
-                latest_user,
-            )
-        if latest_user:
-            if _MEMORY_REFERENCE_RE.search(latest_user):
-                is_search = True
-            if _DETAIL_REQUEST_RE.search(latest_user):
-                require_detail = True
-        if not topic:
-            topic = _fallback_digest_topic(latest_user, keywords)
-
-        return {
-            "is_search_needed": is_search,
-            "keywords": keywords,
-            "require_detail": require_detail,
-            "status": status,
-            "topic": topic,
-            "first_responder": first_responder,
-        }
-    except Exception:
-        return {
-            "is_search_needed": False, "keywords": [], "require_detail": False,
-            "status": "", "topic": "", "first_responder": "random",
-        }
+    latest_user = _latest_user_text(recent_messages)
+    return {
+        "is_search_needed": bool(_MEMORY_REFERENCE_RE.search(latest_user)),
+        "keywords": [],
+        "require_detail": bool(_DETAIL_REQUEST_RE.search(latest_user)),
+        "status": "",
+        "topic": _local_front_topic(latest_user),
+        "first_responder": _resolve_local_first_responder(
+            latest_user,
+            group_participants,
+        ),
+    }
 
 
 # ── 手动总结：分组提取记忆 ─────────────────────────
@@ -883,26 +797,6 @@ def _split_into_groups(msgs: list, group_size: int = 50, min_group_size: int = 2
         groups.append(msgs[offset:offset + size])
         offset += size
     return groups
-
-
-async def _call_flash_lite(prompt: str) -> dict | None:
-    """调用哨兵模型，返回 JSON 结果（仅供即时哨兵使用）"""
-    scfg = get_sentinel_config()
-    if not scfg["api_key"]:
-        return None
-    try:
-        raw = await _call_sentinel_text(scfg, prompt, timeout=60)
-        if not raw:
-            return None
-        # 提取 JSON
-        if "```" in raw:
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                raw = raw[start:end]
-        return json.loads(raw)
-    except Exception:
-        return None
 
 
 def _parse_json_response(raw: str) -> dict | None:
@@ -1185,6 +1079,9 @@ def _atomic_digest_prompt(
         "5. 保留有信息增量的内容：明确的测试反馈、用户的判断标准、项目推进结论、可复述的有趣场景、重要情绪原因、关系氛围变化、会影响以后陪伴的生活线索。\n"
         "6. 丢掉普通流水账：常规吃喝睡、一次性操作状态、无结论的过程、泛泛的“做了很多事”、无聊的抱怨等等。除非它和健康/金钱/项目/长期习惯/特别有记忆点的场景直接相关。\n"
         "7. content 写成自然记忆，尽量具体，不要只写“用户讨论了某事”；要写出对象、动作、结论或场景。\n"
+        f"人物称谓：content 统一使用第三人称姓名叙述，记忆所属角色写作{actor_name}，用户写作{user_name}，其他人物沿用原文姓名。"
+        "不使用“我、我们、你、你们、他、她、他们、她们”等人称代词代替人物姓名；每条须独立写清人物，不依赖其他条目补足指代。"
+        "原文引语若含人称代词，改为姓名明确的转述，不冒充逐字引用；仍可保留有依据的个人感受。\n"
         "8. 不要输出解释型来源说明，不要写“这说明了什么”。来源原文由后端按 source_message_ids 读取真实消息。\n"
         "9. source_message_ids 能引用真实支撑消息时就填 1-6 个；找不到或拿不准时可以留空数组，不要为了凑来源而编造 id。\n"
         "10. 每 50 条消息通常产出 1-3 条 daily。宁可少写，也不要把普通流水账塞进记忆库。\n\n"

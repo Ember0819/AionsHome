@@ -167,10 +167,12 @@ body[data-theme="dark"] .schedule-page { --sch-muted:#c5c9ef; --sch-subtle:#aeb5
 <script src="/static/common.js?v=20260905-schedule-back"></script>
 <script src="/static/schedule-ui.js?v=20260905-compact"></script>
 <script>
+let scheduleRequestId = 0;
+let memoRequestId = 0;
 connectCommonWS(msg => {
   if (ScheduleUI.shouldReloadSchedules(msg)) loadSchedules();
   if (ScheduleUI.shouldReloadPrivateMemos(msg)) loadPrivateMemos();
-});
+}, { reconcile: () => Promise.all([loadSchedules(), loadPrivateMemos()]) });
 
 (async function init() {
   await loadSchedules();
@@ -180,7 +182,9 @@ connectCommonWS(msg => {
 window.onAionPrivateMemosChanged = () => loadPrivateMemos();
 
 async function loadSchedules() {
+  const requestId = ++scheduleRequestId;
   const result = await ScheduleUI.loadScheduleLists(api);
+  if (requestId !== scheduleRequestId) return;
   if (result.active !== null) {
     renderScheduleList(result.active, "schList", "暂无日程", false);
   }
@@ -240,7 +244,9 @@ let activePrivateMemos = [];
 let completedPrivateMemos = [];
 
 async function loadPrivateMemos() {
+  const requestId = ++memoRequestId;
   const result = await ScheduleUI.loadPrivateMemoLists(api);
+  if (requestId !== memoRequestId) return;
   if (result.active !== null) activePrivateMemos = result.active;
   if (result.completed !== null) completedPrivateMemos = result.completed;
   renderPrivateMemoList(activePrivateMemos, 'privateMemoList', '暂无备忘');

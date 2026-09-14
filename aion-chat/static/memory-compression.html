@@ -210,6 +210,16 @@
     .status.info { display: block; background: var(--compression-accent-soft); color: var(--accent); }
     .status.success { display: block; background: var(--surface2); color: var(--compression-ok); }
     .status.error { display: block; background: var(--surface2); color: var(--compression-warn); }
+    .history { margin-top: 22px; }
+    .history h3 { margin: 0 0 6px; font-size: 16px; }
+    .history-note,.history-meta { color: var(--text3); font-size: 12px; line-height: 1.6; }
+    .history-record { margin: 10px 0; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .history-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; }
+    .history-period { margin: 8px 0; font-weight: 700; overflow-wrap: anywhere; }
+    .history-counts { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
+    .history-change { color: var(--compression-ok); font-size: 12px; font-weight: 700; }
+    .history-change.grown { color: var(--compression-warn); }
+    .history-meta { margin-top: 5px; overflow-wrap: anywhere; }
     @media (max-width: 720px) {
       .sub-page { max-width: 600px; }
       .controls { grid-template-columns: 1fr; }
@@ -229,6 +239,7 @@
     </header>
     <div class="page-content">
       <p class="intro">只整理已闭合周期；旧摘要进入冷档案并保留原文关系，不参与正常召回。</p>
+      <p class="intro">每天凌晨 05:00 自动检查两个记忆库，先日整理、后周整理；漏跑自动补做，月整理仍由你手动进行。自动任务使用聊天室当前配置的聊天模型，进度和结果可在下方查看。</p>
       <section class="controls">
         <label>记忆库
           <select id="compressionTarget">
@@ -236,7 +247,7 @@
             <option value="chatroom">聊天室记忆库</option>
           </select>
         </label>
-        <label>压缩模型
+        <label>手动压缩模型
           <select id="compressionModel"></select>
         </label>
         <div class="note">日期以凌晨 05:00 为界；无候选时按钮禁用，也不会调用模型。</div>
@@ -247,7 +258,7 @@
         <div class="card-head">
           <div>
             <h2>7 天外每日记忆</h2>
-            <p>原始摘要按完整日期整理，每天保留 1～5 条。</p>
+            <p>整理整天结束满 7 天的原始摘要，每天保留 1～5 条。</p>
           </div>
           <div class="count"><strong data-count>—</strong>条参与</div>
         </div>
@@ -266,7 +277,7 @@
         <div class="card-head">
           <div>
             <h2>每周记忆</h2>
-            <p>整理已结束自然周中的每日胶囊，不包含本周。</p>
+            <p>整理整周结束满 90 天、日整理已完成的每日胶囊。</p>
           </div>
           <div class="count"><strong data-count>—</strong>条参与</div>
         </div>
@@ -285,7 +296,7 @@
         <div class="card-head">
           <div>
             <h2>每月记忆</h2>
-            <p>整理已结束自然月中的每周胶囊，不包含本月。</p>
+            <p>手动整理整月结束满一年（365 天）的每周胶囊。</p>
           </div>
           <div class="count"><strong data-count>—</strong>条参与</div>
         </div>
@@ -301,6 +312,12 @@
       </article>
       </section>
       <div id="compressionStatus" class="status"></div>
+      <section class="history">
+        <h3>整理存档</h3>
+        <p class="history-note">每条记录对应一次成功保存的批次，按完成时间排列；条数是当时的快照，包含提取出的长期事实，不含家庭动态感想。</p>
+        <div id="compressionHistory" aria-live="polite">正在读取存档……</div>
+        <button id="historyMore" type="button" hidden>加载更早记录</button>
+      </section>
     </div>
   </main>
 
@@ -308,6 +325,43 @@
     const previews = {};
     const jobs = {};
     let jobPollTimer = null;
+    let jobPollBusy = false, jobPollAgain = false;
+    let compressionVisible = window.frameElement?.dataset.aionSubPageVisible !== '0';
+    let jobSocket = null, reconnectTimer = null;
+    function compressionPageVisible() { return compressionVisible && !document.hidden; }
+    function syncCompressionConnection() {
+      clearTimeout(jobPollTimer);clearTimeout(reconnectTimer);
+      if (!compressionPageVisible()) {
+        if (jobSocket) {const socket=jobSocket;jobSocket=null;socket.onclose=null;socket.close();}
+        return;
+      }
+      pollCompressionJobs(true);
+      if (jobSocket) return;
+      const socket = new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws`);
+      jobSocket=socket;
+      socket.onopen=()=>{if(jobSocket===socket&&compressionPageVisible())pollCompressionJobs(true);};
+      socket.onmessage=event=>{
+        if(!compressionPageVisible())return;
+        try {const message=JSON.parse(event.data);
+          if(message.type==='memory_compression_job'&&message.data?.target===document.getElementById('compressionTarget').value)pollCompressionJobs(true);
+        } catch(_) {}
+      };
+      socket.onclose=()=>{
+        if(jobSocket!==socket)return;jobSocket=null;
+        if(compressionPageVisible())reconnectTimer=setTimeout(syncCompressionConnection,10000);
+      };
+    }
+    const oldCompressionVisibility=window.onAionSubPageVisibilityChanged;
+    window.onAionSubPageVisibilityChanged=visible=>{
+      oldCompressionVisibility?.(visible);
+      if(compressionVisible===!!visible)return;
+      compressionVisible=!!visible;syncCompressionConnection();
+    };
+    document.addEventListener('visibilitychange',syncCompressionConnection);
+    window.addEventListener('pagehide',()=>{compressionVisible=false;syncCompressionConnection();});
+    window.addEventListener('pageshow',event=>{if(event.persisted){compressionVisible=window.frameElement?.dataset.aionSubPageVisible!=='0';syncCompressionConnection();}});
+    let historyItems = [];
+    let historyRequestId = 0;
 
     async function api(method, url, body) {
       const response = await fetch(url, {
@@ -324,6 +378,45 @@
       const el = document.getElementById("compressionStatus");
       el.className = `status ${kind}`;
       el.textContent = message;
+    }
+
+    function escapeHistoryText(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    function renderHistoryRecord(item) {
+      const input = Number(item.input_count || 0), output = Number(item.output_count || 0);
+      const delta = output - input;
+      const change = delta > 0 ? `输出增加 ${delta} 条` : delta < 0
+        ? `减少 ${-delta} 条${item.reduction_percent == null ? '' : `（${Number(item.reduction_percent)}%）`}` : '条数不变';
+      const breakdown = item.durable_output_count == null ? '旧记录未区分输出类型，已保留原始总数'
+        : `普通记忆 ${Number(item.memory_output_count)} 条 · 长期事实 ${Number(item.durable_output_count)} 条`;
+      const level = {daily:'日整理',weekly:'周整理',monthly:'月整理'}[item.level] || '记忆整理';
+      return `<article class="history-record"><div class="history-head"><strong>${level}</strong><span class="history-note">${escapeHistoryText(new Date(item.completed_at * 1000).toLocaleString('zh-CN', {hour12:false}))}</span></div><div class="history-period">${escapeHistoryText(item.period_label)}</div><div class="history-counts"><span>输入 <strong>${input}</strong> 条 → 输出 <strong>${output}</strong> 条</span><span class="history-change${delta > 0 ? ' grown' : ''}">${change}</span></div><div class="history-meta">${breakdown}<br>模型：${escapeHistoryText(item.model_key)}</div></article>`;
+    }
+
+    async function loadHistory(reset = true) {
+      const requestId = ++historyRequestId;
+      const target = document.getElementById('compressionTarget').value;
+      const list = document.getElementById('compressionHistory');
+      const more = document.getElementById('historyMore');
+      if (reset) { historyItems = []; list.textContent = '正在读取存档……'; more.hidden = true; }
+      more.disabled = true;
+      try {
+        const result = await api('GET', `/api/memories/calendar-compression/history?target=${encodeURIComponent(target)}&offset=${historyItems.length}&limit=20`);
+        if (requestId !== historyRequestId || target !== document.getElementById('compressionTarget').value) return;
+        historyItems.push(...(result.items || []));
+        list.innerHTML = historyItems.length ? historyItems.map(renderHistoryRecord).join('') : '<p class="history-note">这个记忆库还没有成功整理的记录。</p>';
+        more.hidden = !result.has_more;
+        more.textContent = '加载更早记录';
+      } catch (error) {
+        if (requestId !== historyRequestId) return;
+        if (reset) list.textContent = `存档读取失败：${error.message}`;
+        more.hidden = false;
+        more.textContent = '重新读取存档';
+      } finally {
+        if (requestId === historyRequestId) more.disabled = false;
+      }
     }
 
     function renderPreview(level, preview) {
@@ -377,7 +470,7 @@
         if (previews[level]) renderPreview(level, previews[level]);
       } else if (job.status === "failed") {
         text.classList.add("failed");
-        text.textContent = `上次压缩失败：${job.error || job.result?.message || "未知错误"}。旧记忆未被本次失败任务归档。`;
+        text.textContent = `上次压缩失败：${job.error || job.result?.message || "未知错误"}。未完成的批次保留原记忆；已成功的批次见下方整理存档。`;
         if (previews[level]) renderPreview(level, previews[level]);
       }
     }
@@ -410,13 +503,20 @@
     }
 
     async function pollCompressionJobs(refreshPreviewsOnFinish = false) {
+      if(!compressionPageVisible())return;
+      if(jobPollBusy){jobPollAgain=true;return;}
+      clearTimeout(jobPollTimer);jobPollBusy=true;
       const target = document.getElementById("compressionTarget").value;
       try {
         const result = await api("GET", `/api/memories/calendar-compression/jobs?target=${encodeURIComponent(target)}`);
+        if (target !== document.getElementById('compressionTarget').value) return;
         let finished = false;
+        let historyChanged = false;
         ["daily", "weekly", "monthly"].forEach(level => {
           const previous = jobs[level]?.status;
           const current = result.jobs?.[level] || null;
+          if (current && (current.id !== jobs[level]?.id || current.status !== previous ||
+              current.progress?.completed_calls !== jobs[level]?.progress?.completed_calls)) historyChanged = true;
           renderJob(level, current);
           if (refreshPreviewsOnFinish && ["queued", "running"].includes(previous) &&
               current && ["completed", "failed"].includes(current.status)) {
@@ -424,14 +524,16 @@
           }
         });
         if (finished) await loadPreviews();
-        const hasActive = Object.values(result.jobs || {}).some(job =>
-          job.status === "running" || job.status === "queued"
-        );
-        if (jobPollTimer) clearTimeout(jobPollTimer);
-        jobPollTimer = setTimeout(() => pollCompressionJobs(true), hasActive ? 1500 : 5000);
+        if (historyChanged) await loadHistory();
       } catch (error) {
-        if (jobPollTimer) clearTimeout(jobPollTimer);
-        jobPollTimer = setTimeout(() => pollCompressionJobs(true), 5000);
+        status('进度暂未同步，正在压缩的任务不受影响；重新进入页面可同步。', 'error');
+      } finally {
+        jobPollBusy=false;
+        if(compressionPageVisible()) {
+          if(jobPollAgain){jobPollAgain=false;jobPollTimer=setTimeout(()=>pollCompressionJobs(true),0);}
+          else if(Object.values(jobs).some(job=>['queued','running'].includes(job?.status)))
+            jobPollTimer=setTimeout(()=>pollCompressionJobs(true),5000);
+        } else jobPollAgain=false;
       }
     }
 
@@ -468,7 +570,7 @@
         jobs[level] = null;
         renderJob(level, null);
       });
-      await Promise.all([loadPreviews(), pollCompressionJobs(false)]);
+      await Promise.all([loadPreviews(), pollCompressionJobs(false), loadHistory()]);
     });
     document.getElementById("compressionModel").addEventListener("change", event => {
       localStorage.setItem("memory_compression_model", event.target.value);
@@ -477,9 +579,12 @@
       button.addEventListener("click", () => runCompression(button.closest("[data-level]").dataset.level));
     });
 
-    Promise.all([loadModels(), loadPreviews(), pollCompressionJobs(false)]).catch(error => {
+    document.getElementById('historyMore').addEventListener('click', () => loadHistory(false));
+
+    Promise.all([loadModels(), loadPreviews(), pollCompressionJobs(false), loadHistory()]).catch(error => {
       status(`页面初始化失败：${error.message}`, "error");
     });
+    syncCompressionConnection();
   </script>
 </body>
 </html>

@@ -114,6 +114,32 @@ def find_wechat_mode_for_sender(
     return copy.deepcopy(mode) if isinstance(mode, dict) else None
 
 
+def sync_wechat_mode_binding(
+    settings: dict[str, Any], binding: dict[str, Any], *, now: float | None = None,
+) -> bool:
+    """Move the mirrored window with a rebind, preserving mode state and extra routes."""
+    mode = find_wechat_mode_for_sender(
+        settings, binding["account_id"], binding["wechat_user_id"]
+    )
+    route = _normalize_route(binding)
+    if not mode or not _valid_route(route):
+        return False
+    previous_route = _normalize_route(mode.get("inbound_route"))
+    if route == previous_route:
+        return False
+    routes = [route] + [
+        item for item in (mode.get("outbound_routes") or [])
+        if isinstance(item, dict) and _normalize_route(item) != previous_route
+        and _normalize_route(item)["source_type"] != route["source_type"]
+    ]
+    set_wechat_mode(
+        settings, account_id=binding["account_id"], wechat_user_id=binding["wechat_user_id"],
+        inbound_route=route, outbound_routes=routes,
+        enabled=bool(mode.get("enabled")), now=now,
+    )
+    return True
+
+
 def active_wechat_modes_for_route(
     settings: dict[str, Any],
     source_type: str,

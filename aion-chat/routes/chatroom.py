@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, ALBUM_IMAGES_DIR, MODELS, SETTINGS, get_sentinel_config, resolve_model_key, resolve_model_transport_mode
 from database import get_db
 from ws import manager
+from generation_control import (cancellable, cancel_generation, generation_status, GenerationQueue, spawn_generation_task)
+from cancelled_reply import save_cancelled_replies
 from active_window_state import record_chatroom_active
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from tts import TTSStreamer, synthesize_message_tts_later
@@ -63,6 +65,7 @@ from safe_live_stream import consume_safe_live_stream
 from realtime_stream_transport import consume_realtime_transport
 from band_commands import process_band_vibration, with_band_vibration_attachment
 from hug_pillow_commands import process_hug_pillow_commands
+from pat_commands import process_pat_commands
 from app_supervision_ai import (
     queue_app_supervision_reply_command,
     broadcast_app_supervision_command,
@@ -711,6 +714,13 @@ async def _process_chatroom_commands(
     if wechat_messages:
         triggered["wechat_messages"] = wechat_messages
 
+    async def _save_pat_event(message):
+        await _q.put({"type": "system_msg", "message": message})
+
+    full_text = await process_pat_commands(
+        full_text, source_type="chatroom", source_id=room_id,
+        sender=who_identity, source_msg_id=msg_id, on_saved=_save_pat_event,
+    )
     full_text = await process_band_vibration(
         full_text,
         source_type="chatroom",
@@ -737,10 +747,10 @@ async def _process_chatroom_commands(
         for keyword in music_matches:
             keyword = keyword.strip()
             try:
-                results = search_songs(keyword, limit=5)
+                results = await asyncio.to_thread(search_songs, keyword, limit=5)
                 if results:
                     song = results[0]
-                    song["audio_url"] = get_audio_url(song["id"])
+                    song["audio_url"] = await asyncio.to_thread(get_audio_url, song["id"])
                     song["candidates"] = results[1:4]
                     music_cards.append(song)
             except Exception:
@@ -874,7 +884,7 @@ async def _process_chatroom_commands(
                     await broadcast_synced(ws_manager, mt_data)
                     if expect:
                         from routes.moments import _trigger_ai_replies
-                        asyncio.create_task(_trigger_ai_replies(mt_id, exclude_author=author))
+                        spawn_generation_task(_trigger_ai_replies(mt_id, exclude_author=author))
                 except Exception as e:
                     print(f"[CHATROOM_MOMENT] 发布失败: {e}")
 
@@ -1124,7 +1134,7 @@ async def _start_chatroom_lounge_visit(
         except Exception:
             pass
 
-    asyncio.create_task(run())
+    spawn_generation_task(run())
     return friend.id
 
 
@@ -1182,7 +1192,7 @@ def _luckin_attachments_from_triggered(triggered: dict) -> list[dict]:
 def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_key: str, trigger_msg_id: str | None = None):
     """根据 _process_chatroom_commands 返回的 triggered dict，启动异步后续任务"""
     if triggered.get("cam_check"):
-        asyncio.create_task(
+        spawn_generation_task(
             _chatroom_cam_check(
                 room_id,
                 sender,
@@ -1191,23 +1201,23 @@ def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_k
             )
         )
     if triggered.get("activity"):
-        asyncio.create_task(_chatroom_activity_check(room_id, sender, model_key, triggered["activity"]))
+        spawn_generation_task(_chatroom_activity_check(room_id, sender, model_key, triggered["activity"]))
     if triggered.get("poi"):
-        asyncio.create_task(_chatroom_poi_check(room_id, sender, model_key, triggered["poi"]))
+        spawn_generation_task(_chatroom_poi_check(room_id, sender, model_key, triggered["poi"]))
     if triggered.get("web_search"):
-        asyncio.create_task(_chatroom_web_search(room_id, sender, model_key, triggered["web_search"]))
+        spawn_generation_task(_chatroom_web_search(room_id, sender, model_key, triggered["web_search"]))
     if triggered.get("memory_search"):
-        asyncio.create_task(
+        spawn_generation_task(
             _chatroom_memory_search(
                 room_id, sender, model_key, triggered["memory_search"]
             )
         )
     if triggered.get("image_gen"):
         ig = triggered["image_gen"]
-        asyncio.create_task(_chatroom_image_gen(room_id, sender, ig["prompt"], ig["is_selfie"]))
+        spawn_generation_task(_chatroom_image_gen(room_id, sender, ig["prompt"], ig["is_selfie"]))
     if triggered.get("song_gen"):
         sg = triggered["song_gen"]
-        asyncio.create_task(_chatroom_song_gen(room_id, sender, sg["prompt"], trigger_msg_id))
+        spawn_generation_task(_chatroom_song_gen(room_id, sender, sg["prompt"], trigger_msg_id))
 
 
 async def _broadcast_chatroom_ai_status(room_id: str, sender: str, text: str):
@@ -2079,12 +2089,12 @@ async def _judge_ambient_voice(transcript: str) -> dict:
     from memory import _call_sentinel_text
 
     scfg = get_sentinel_config()
-    if not scfg.get("api_key"):
+    if not scfg.get("ready"):
         return {
             "should_wake": False,
             "summary": "",
             "topic": "",
-            "reason": "未配置哨兵模型",
+            "reason": "哨兵模型未就绪",
             "importance": 0.0,
         }
 
@@ -2181,7 +2191,7 @@ async def _run_ambient_voice_reply(
         context_limit = room.get("context_minutes", 30)
         query_text = decision.get("summary") or decision.get("topic") or ""
         ambient_context = _ambient_voice_prompt(decision, forced=forced)
-        _q: asyncio.Queue = asyncio.Queue()
+        _q: asyncio.Queue = GenerationQueue()
 
         if speaker == "aion":
             await _reply_aion(
@@ -2712,8 +2722,8 @@ async def patch_room_settings(room_id: str, body: ChatroomSettingsUpdate):
         await db.commit()
 
     # The HTTP save result no longer waits for every WebSocket client.
-    asyncio.create_task(manager.broadcast(attach_sync_seq(sync_event, seq)))
-    asyncio.create_task(manager.broadcast({"type": "chatroom_room_updated", "data": {
+    spawn_generation_task(manager.broadcast(attach_sync_seq(sync_event, seq)))
+    spawn_generation_task(manager.broadcast({"type": "chatroom_room_updated", "data": {
         "id": room_id,
         "title": room.get("title"),
         "context_limit": room.get("context_limit"),
@@ -3053,7 +3063,22 @@ def _is_manual_group_reply_mode() -> bool:
     return load_chatroom_config().get("reply_order", "random") == "manual"
 
 
+async def _save_cancelled_reply(scope):
+    return await save_cancelled_replies(scope, _visible_chatroom_text)
+
+
+@router.get("/rooms/{room_id}/generation-status")
+async def get_generation_status(room_id: str, generation_id: str = Query(..., max_length=128)):
+    return generation_status("chatroom", room_id, generation_id)
+
+
+@router.post("/rooms/{room_id}/abort")
+async def abort_generation(room_id: str, generation_id: str | None = Query(None, max_length=128)):
+    return await cancel_generation("chatroom", room_id, generation_id)
+
+
 @router.post("/rooms/{room_id}/send")
+@cancellable("chatroom", _save_cancelled_reply)
 async def send_message(room_id: str, body: MsgSend):
     """用户发消息，触发 AI 回复"""
 
@@ -3141,7 +3166,7 @@ async def send_message(room_id: str, body: MsgSend):
     tts_connor_voice = body.tts_connor_voice
     whisper_mode = body.whisper_mode
 
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     async def _bg_generate():
         try:
@@ -3165,7 +3190,7 @@ async def send_message(room_id: str, body: MsgSend):
         finally:
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         while True:
@@ -3178,6 +3203,7 @@ async def send_message(room_id: str, body: MsgSend):
 
 
 @router.post("/rooms/{room_id}/reply-once")
+@cancellable("chatroom", _save_cancelled_reply)
 async def reply_once(room_id: str, body: ReplyOnceTrigger):
     """指定群聊中的某一位 AI 单独回复一次。"""
     room, msgs = await _load_room_and_messages(room_id)
@@ -3197,7 +3223,7 @@ async def reply_once(room_id: str, body: ReplyOnceTrigger):
     model_key = body.model
     connor_model_key = _resolve_connor_model(body.connor_model)
 
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     async def _bg_generate():
         try:
@@ -3223,7 +3249,7 @@ async def reply_once(room_id: str, body: ReplyOnceTrigger):
         finally:
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         while True:
@@ -3336,7 +3362,7 @@ async def ambient_voice_evaluate(room_id: str, body: AmbientVoiceEvaluate):
     model_key = (body.model or cfg.get("aion_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     connor_model_key = _resolve_connor_model(body.connor_model or cfg.get("connor_model"))
 
-    asyncio.create_task(_run_ambient_voice_reply(
+    spawn_generation_task(_run_ambient_voice_reply(
         room_id,
         speaker,
         decision,
@@ -3359,6 +3385,7 @@ async def ambient_voice_evaluate(room_id: str, body: AmbientVoiceEvaluate):
 
 
 @router.post("/messages/{msg_id}/edit-resend")
+@cancellable("chatroom", _save_cancelled_reply)
 async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
     """编辑用户消息后重发：更新内容，删除后续消息，再按房间类型重新生成回复。"""
     async with get_db() as db:
@@ -3408,7 +3435,7 @@ async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
     if room_type == "group":
         cam.reset_patrol_timer()
 
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     async def _bg_generate():
         try:
@@ -3437,7 +3464,7 @@ async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
         finally:
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         while True:
@@ -3450,6 +3477,7 @@ async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
 
 
 @router.post("/messages/{msg_id}/regenerate")
+@cancellable("chatroom", _save_cancelled_reply)
 async def regenerate_chatroom_message(msg_id: str, body: MsgRegenerate):
     """重新生成一条 AI 消息：删除该消息及其后的消息，再让同一位 AI 重答。"""
     async with get_db() as db:
@@ -3482,7 +3510,7 @@ async def regenerate_chatroom_message(msg_id: str, body: MsgRegenerate):
     query_text = msgs[-1]["content"] if msgs else ""
     model_key = body.model
     connor_model_key = _resolve_connor_model(body.connor_model)
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     async def _bg_generate():
         try:
@@ -3508,7 +3536,7 @@ async def regenerate_chatroom_message(msg_id: str, body: MsgRegenerate):
         finally:
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_generate())
+    spawn_generation_task(_bg_generate())
 
     async def generate():
         while True:
@@ -3675,16 +3703,13 @@ async def _generate_group_replies(room_id, room, msgs, model_key, connor_model_k
             "content": str(msg.get("content") or "")[:200],
         })
     try:
-        digest = await asyncio.wait_for(
-            instant_digest(
-                recent_for_digest,
-                group_participants={
-                    "user": user_name,
-                    "aion": ai_name,
-                    "connor": connor_name,
-                },
-            ),
-            timeout=4,
+        digest = await instant_digest(
+            recent_for_digest,
+            group_participants={
+                "user": user_name,
+                "aion": ai_name,
+                "connor": connor_name,
+            },
         )
     except Exception:
         pass
@@ -3964,6 +3989,7 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
 # ══════════════════════════════════════════════════
 
 @router.post("/rooms/{room_id}/ai-chat")
+@cancellable("chatroom", _save_cancelled_reply)
 async def trigger_ai_chat(room_id: str, body: AiChatTrigger):
     """触发 AI 互聊（Aion 和 Connor 轮流对话）"""
     room, msgs = await _load_room_and_messages(room_id)
@@ -3978,7 +4004,7 @@ async def trigger_ai_chat(room_id: str, body: AiChatTrigger):
     tts_aion_voice = body.tts_aion_voice
     tts_connor_voice = body.tts_connor_voice
 
-    _q: asyncio.Queue = asyncio.Queue()
+    _q: asyncio.Queue = GenerationQueue()
 
     async def _bg_ai_chat():
         nonlocal msgs
@@ -4031,7 +4057,7 @@ async def trigger_ai_chat(room_id: str, body: AiChatTrigger):
         finally:
             await _q.put({"type": "done"})
 
-    asyncio.create_task(_bg_ai_chat())
+    spawn_generation_task(_bg_ai_chat())
 
     async def generate():
         while True:

@@ -94,13 +94,15 @@ class AppSupervisionCapabilityTests(unittest.TestCase):
         self.assertIn("[APP_LOCK:groupId|分钟|锁屏提示]", text)
         self.assertIn("[APP_TEMP_UNLOCK:groupId|分钟|解锁说明]", text)
         self.assertIn("[APP_UNLOCK:groupId]", text)
-        self.assertIn("[DEVICE_LOCK:分钟|锁屏提示]", text)
+        self.assertIn("[COME_HOME:一句话]", text)
+        self.assertIn("[LOOK_AT_ME:分钟|一句话]", text)
+        self.assertNotIn("[DEVICE_LOCK:", text)
         self.assertIn("[DEVICE_TEMP_UNLOCK:分钟|解锁说明]", text)
         self.assertIn("[DEVICE_UNLOCK]", text)
         self.assertIn("整机状态 LOCKED", text)
         self.assertIn("负责角色 connor", text)
         self.assertIn("该睡觉了", text)
-        self.assertIn("连续切换", text)
+        self.assertIn("日常", text)
         self.assertIn("xhs-main → 小红书", text)
         self.assertIn("douyin-main → 抖音", text)
         self.assertIn("21.0 分钟（估算）", text)
@@ -153,6 +155,34 @@ class AppSupervisionCapabilityTests(unittest.TestCase):
 
 
 class AppSupervisionCommandParserTests(unittest.TestCase):
+    def test_attention_commands_parse_without_app_groups_and_hide_from_streams(self):
+        for tag, action, minutes in (
+            ("[COME_HOME:回来陪我说说话]", "come_home", None),
+            ("[LOOK_AT_ME:5|回来陪我说说话]", "look_at_me", 5),
+        ):
+            with self.subTest(tag=tag):
+                cleaned, command = parse_app_supervision_command("好" + tag, set(), enabled=True)
+                self.assertEqual("好", cleaned)
+                self.assertEqual(action, command["action"])
+                self.assertEqual("", command["groupId"])
+                self.assertEqual(minutes, command.get("minutes"))
+                self.assertEqual("回来陪我说说话", command["message"])
+                self.assertEqual(("好", None), parse_app_supervision_command("好" + tag, set(), enabled=False))
+                stream = WebCommandStreamFilter()
+                self.assertEqual("好。", "".join(stream.feed(c) for c in "好" + tag + "。") + stream.flush())
+
+    def test_invalid_attention_commands_are_hidden_without_execution(self):
+        for tag in ("[COME_HOME: ]", "[LOOK_AT_ME:0|回来]", "[LOOK_AT_ME:121|回来]",
+                    "[LOOK_AT_ME:1.5|回来]", "[LOOK_AT_ME:5| ]", "[LOOK_AT_ME:5]"):
+            with self.subTest(tag=tag):
+                self.assertEqual(("好", None), parse_app_supervision_command("好" + tag, set(), enabled=True))
+
+    def test_attention_notice_uses_configured_names(self):
+        for action, suffix in (("come_home", ""), ("look_at_me", "，并锁定了手机 5 分钟")):
+            self.assertEqual("【星星】唤回了月亮" + suffix, format_app_supervision_result_message(
+                {"action": action, "roleId": "companion_7", "minutes": 5},
+                success=True, reason="", role_names={"companion_7": "星星"}, group_names={}, user_name="月亮"))
+
     def test_three_commands_parse_and_are_removed_from_visible_text(self):
         cases = [
             ("[APP_LOCK:xhs|60|去休息]正文", "lock", 60, "去休息"),

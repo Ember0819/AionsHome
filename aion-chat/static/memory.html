@@ -289,53 +289,11 @@ function restoreMemorySnapshot() {
   } catch(e) { return false; }
 }
 
-// sync_event may arrive live or be replayed after WebSocket reconnect.
+// 使用服务器当前列表统一校准内容、排序和分类计数。
 connectCommonWS(msg => {
-  const searchActive = !!($("memSearch").value || "").trim();
-  if (searchActive && ["memory_added", "memory_updated", "memory_deleted"].includes(msg.type)) {
-    loadMemories({ reset: true });
-    return;
-  }
-  if (msg.type === "memory_added") {
-    const existed = _allMemories.some(m => m.id === msg.data?.id);
-    upsertMemory(msg.data, true);
-    _memoryTotal = Math.max(_memoryTotal + (existed ? 0 : 1), _allMemories.length);
-    if (!existed) {
-      const kind = memoryKind(msg.data || {});
-      _memoryKindTotals[kind] = Number(_memoryKindTotals[kind] || 0) + 1;
-      _memoryKindTotals.all = _memoryTotal;
-    }
-  } else if (msg.type === "memory_updated") {
-    const previous = _allMemories.find(m => m.id === msg.data?.id);
-    const previousKind = previous ? memoryKind(previous) : null;
-    upsertMemory(msg.data, false);
-    const updated = _allMemories.find(m => m.id === msg.data?.id);
-    const updatedKind = updated ? memoryKind(updated) : null;
-    if (previousKind && updatedKind && previousKind !== updatedKind) {
-      _memoryKindTotals[previousKind] = Math.max(0, Number(_memoryKindTotals[previousKind] || 0) - 1);
-      _memoryKindTotals[updatedKind] = Number(_memoryKindTotals[updatedKind] || 0) + 1;
-    }
-  } else if (msg.type === "memory_deleted") {
-    const removed = _allMemories.find(m => m.id === msg.data?.id);
-    _allMemories = _allMemories.filter(m => m.id !== msg.data?.id);
-    _memoryTotal = Math.max(0, _memoryTotal - 1);
-    if (removed) {
-      const kind = memoryKind(removed);
-      _memoryKindTotals[kind] = Math.max(0, Number(_memoryKindTotals[kind] || 0) - 1);
-    }
-    _memoryKindTotals.all = _memoryTotal;
-  } else if (msg.type === "memory_collection_changed") {
-    loadMemories({ reset: true });
-    return;
-  } else if (msg.type === "sync_reset_required") {
-    loadMemories({ reset: true });
-    return;
-  } else {
-    return;
-  }
-  renderMemories();
-  saveMemorySnapshot();
-});
+  if (["memory_added", "memory_updated", "memory_deleted", "memory_collection_changed",
+       "sync_reset_required"].includes(msg.type)) loadMemories({ reset: true });
+}, { reconcile: () => loadMemories({ reset: true }) });
 
 (async function init() {
   restoreMemorySnapshot();

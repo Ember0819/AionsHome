@@ -474,19 +474,23 @@ public final class AppSupervisionRuntime {
             return new CommandResult(false, "missing_command_id");
         }
         boolean deviceAction = "device_lock".equals(action)
+                || "look_at_me".equals(action)
+                || "come_home".equals(action)
                 || "device_temp_unlock".equals(action)
                 || "device_unlock".equals(action);
         String normalizedGroupId = groupId == null ? "" : groupId.trim();
         if (deviceAction && !normalizedGroupId.isEmpty()) {
             return new CommandResult(false, "device_group_must_be_empty");
         }
+        // A recall only opens the conversation; it must not change any focus state.
+        if ("come_home".equals(action)) return new CommandResult(true, "");
         AppGroup group = deviceAction ? null : engine.group(normalizedGroupId);
         if (!deviceAction && group == null) {
             return new CommandResult(false, "unknown_group");
         }
         SupervisionTime commandTime = now();
         try {
-            if ("device_lock".equals(action)) {
+            if ("device_lock".equals(action) || "look_at_me".equals(action)) {
                 DeviceLockState.Snapshot before =
                         deviceLockState.snapshot(commandTime.getElapsedMs());
                 if (before.getLock() != null

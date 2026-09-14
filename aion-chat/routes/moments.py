@@ -2,6 +2,8 @@
 朋友圈 API：列表查询、发布、删除、点赞/踩、评论、AI 自动回复
 """
 
+from generation_control import spawn_generation_task
+
 import time, json, asyncio, random, re
 from typing import Optional, Any
 from datetime import datetime
@@ -583,7 +585,7 @@ async def create_moment(body: MomentCreate):
     await broadcast_synced(ws_manager, {"type": "moment_new", "data": moment_data})
 
     # 异步触发两个 AI 回复
-    asyncio.create_task(_trigger_ai_replies(moment_id, exclude_author="user"))
+    spawn_generation_task(_trigger_ai_replies(moment_id, exclude_author="user"))
 
     return moment_data
 
@@ -704,7 +706,7 @@ async def add_comment(moment_id: str, body: CommentCreate):
     await broadcast_synced(ws_manager, {"type": "moment_comment", "data": comment_data})
 
     if target_ai_author:
-        asyncio.create_task(_ai_reply_to_moment(target_ai_author, moment_id, comment_id))
+        spawn_generation_task(_ai_reply_to_moment(target_ai_author, moment_id, comment_id))
 
     return comment_data
 

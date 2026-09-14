@@ -138,6 +138,8 @@ class ConsumeSafeLiveStreamTest(unittest.IsolatedAsyncioTestCase):
             "[WEB_EXTRACT:https://example.com/" + "u" * 900 + "]",
             "[REMINDER:2026-09-04|" + "r" * 900 + "]",
             "[APP_LOCK:social|10|" + "a" * 900 + "]",
+            "[COME_HOME:" + "回来" * 450 + "]",
+            "[LOOK_AT_ME:5|" + "陪我" * 450 + "]",
             "<AUTONOMY_STATE>" + "z" * 900 + "</AUTONOMY_STATE>",
         )
 

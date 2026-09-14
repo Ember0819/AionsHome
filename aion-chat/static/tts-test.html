@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#eef3ff">
+  <title>免费语音试听</title>
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/theme.css" id="aion-theme-css">
+  <link rel="stylesheet" href="/static/tts-test.css?v=studio-20260912">
+</head>
+<body>
+<div class="sub-page voice-page">
+  <header class="top-bar">
+    <button class="back-btn" id="backHome" type="button" data-custom-back aria-label="返回首页" title="返回首页">‹</button>
+    <h2>免费语音试听</h2>
+    <span class="page-badge">音色库</span>
+  </header>
+  <main class="page-content">
+    <div class="intro">
+      <h1>挑一个喜欢的声音</h1>
+      <p>用同一段文字慢慢听，把喜欢的加入候选。</p>
+      <nav aria-label="切换页面"><a href="/chat" data-voice-nav>去聊天 <span aria-hidden="true">↗</span></a><a href="/theater" data-voice-nav>去小剧场 <span aria-hidden="true">↗</span></a></nav>
+    </div>
+    <section class="sample-panel" aria-label="试听文字与播放器">
+      <div class="sample-heading"><label for="sampleText">试听文字</label><span id="charCount"></span></div>
+      <textarea id="sampleText" maxlength="1000">窗外的雨终于停了。她推开门，轻声问：“你一直在等我吗？”他抬起头，笑了笑：“嗯，等你一起回家。”夜风拂过树梢，远处的灯火一盏一盏亮了起来。今天已经很辛苦了，剩下的事情，就留给明天吧。</textarea>
+      <div class="player">
+        <div class="player-top"><p id="status" role="status" aria-live="polite">选一个声音，点「试听」。</p><button id="stop" type="button">停止</button></div>
+        <audio id="audio" controls preload="metadata" aria-label="试听音频"></audio>
+      </div>
+    </section>
+    <section class="favorites-section" aria-labelledby="favoritesHeading">
+      <div class="section-heading"><h2 id="favoritesHeading">我的候选</h2><span id="favoriteCount">正在加载…</span></div>
+      <div id="favorites" class="voice-grid" aria-label="已加入候选的音色"></div>
+      <p id="favoritesEmpty" class="empty-hint" hidden>还没有候选。展开下方音色库，试听后把喜欢的留下吧。</p>
+    </section>
+    <details class="voice-library" id="voiceLibrary">
+      <summary><span>全部免费音色</span><span class="library-count" id="voiceCount">加载中…</span><span class="library-chevron" aria-hidden="true">⌄</span></summary>
+      <div id="voices" class="voice-grid" aria-label="可试听的音色"></div>
+    </details>
+    <p class="note">候选自动保存，手机和电脑共用，可在聊天和小剧场中选择。试听不会切换当前使用的声音。</p>
+  </main>
+</div>
+<script src="/static/common.js"></script>
+<script src="/static/tts-test.js?v=studio-20260912"></script>
+</body>
+</html>

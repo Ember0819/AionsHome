@@ -165,7 +165,7 @@ test('desktop opens before a pending chat initialization and remains on initiali
   assert.deepEqual(opened, ['/']);
 });
 
-test('HTML desktop shell supports navigation and native back before chat scripts load', () => {
+function loadDesktopShell(search = '') {
   const html = fs.readFileSync(path.join(__dirname, 'static', 'chat.html'), 'utf8');
   const shell = html.match(/<script id="initial-desktop">([\s\S]*?)<\/script>/)[1];
   const classes = new Set();
@@ -176,7 +176,7 @@ test('HTML desktop shell supports navigation and native back before chat scripts
   } };
   const context = {
     window: {}, URL, URLSearchParams,
-    location: { search: '', origin: 'https://test.invalid' },
+    location: { search, origin: 'https://test.invalid' },
     document: {
       createElement: () => ({ dataset: {}, style: {}, setAttribute() {} }),
       getElementById: id => id === 'subPageOverlay' ? overlay : { appendChild: frame => frames.push(frame) },
@@ -184,6 +184,11 @@ test('HTML desktop shell supports navigation and native back before chat scripts
   };
   vm.createContext(context);
   vm.runInContext(shell, context);
+  return { context, frames, classes };
+}
+
+test('HTML desktop shell supports navigation and native back before chat scripts load', () => {
+  const { context, frames, classes } = loadDesktopShell();
   assert.equal(frames.length, 1);
   assert.equal(frames[0].src, 'https://test.invalid/');
   assert.equal(classes.has('show'), true);
@@ -193,6 +198,36 @@ test('HTML desktop shell supports navigation and native back before chat scripts
   assert.equal(context.window.handleNativeBack(), 'handled');
   assert.equal(frames[0].src, 'https://test.invalid/');
   assert.equal(context.window.handleNativeBack(), 'dialog');
+});
+
+test('native feature launch keeps all later navigation inside the shell', async () => {
+  const destination = '/chatroom?room=room%20%26%3F%23';
+  const { context, frames, classes } = loadDesktopShell('?page=' + encodeURIComponent(destination));
+  assert.equal(frames[0].src, 'https://test.invalid' + destination);
+  assert.equal(classes.has('show'), true);
+  assert.equal(classes.has('home-subpage'), false);
+  const opened = [];
+  context.openSubPage = url => opened.push(url);
+  context.init = async () => {};
+  vm.runInContext(sourceBetween('function startChatApp()', '// ── 摄像头/监控日志'), context);
+  await context.startChatApp();
+  assert.deepEqual(opened, [destination]);
+  // Home opens the next feature in this same padded shell after a command wakeup.
+  for (const feature of ['/theater', '/settings', '/diary']) {
+    context.window.openSubPage(feature);
+    assert.equal(classes.has('home-subpage'), false);
+    assert.equal(frames[0].src, 'https://test.invalid' + feature);
+    assert.equal(context.window.handleNativeBack(), 'handled');
+    assert.equal(frames[0].src, 'https://test.invalid/');
+    assert.equal(context.window.handleNativeBack(), 'dialog');
+  }
+});
+
+test('shell entry rejects external pages and recursive chat frames', () => {
+  for (const page of ['https://external.invalid/', '/chat?page=%2Fchatroom']) {
+    const { frames } = loadDesktopShell('?page=' + encodeURIComponent(page));
+    assert.equal(frames[0].src, 'https://test.invalid/');
+  }
 });
 
 test('chat startup preserves a destination already chosen on the early desktop', async () => {

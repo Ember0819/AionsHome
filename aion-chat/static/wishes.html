@@ -876,8 +876,11 @@ async function loadActors() {
   updateImplementLabels();
 }
 
+let wishRequestId = 0;
 async function loadWishes() {
+  const requestId = ++wishRequestId;
   const data = await api('GET', '/api/wishes?status=all');
+  if (requestId !== wishRequestId) return;
   state.wishes = Array.isArray(data.items) ? data.items : [];
   state.counts = data.counts || state.counts;
   if (data.actors) state.actors = data.actors;
@@ -1210,7 +1213,9 @@ document.addEventListener('keydown', event => {
 document.getElementById('wishContent')?.addEventListener('input', updateWishCharCount);
 updateWishCharCount();
 loadActors().then(loadWishes).catch(() => showToast('许愿池醒不过来'));
-if (typeof connectCommonWS === 'function') connectCommonWS(handleWishWs);
+if (typeof connectCommonWS === 'function') connectCommonWS(handleWishWs, {
+  reconcile: () => loadWishes().catch(() => {}),
+});
 </script>
 </body>
 </html>

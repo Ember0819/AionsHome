@@ -48,7 +48,7 @@ CAPABILITY_DEFS: list[CapabilityDef] = [
     CapabilityDef("music", "点歌", "media", "注入 [MUSIC:歌曲名 歌手名]，让模型可以点歌或推荐音乐。"),
     CapabilityDef("cam_check", "查看监控/状态", "core", "注入 [CAM_CHECK]，让模型可以主动请求查看当前画面。"),
     CapabilityDef("schedule", "闹铃/日程/监督", "core", "注入闹铃、日程、定时监督和删除日程指令；关闭后也不注入当前日程列表。"),
-    CapabilityDef("app_supervision", "应用监管", "core", "注入应用使用缓存和锁定、暂时解锁、解除锁定指令；关闭后手机计时、上报和检查点唤醒全部静默。"),
+    CapabilityDef("app_supervision", "应用监管", "core", "注入应用使用缓存、唤回聊天、整机专注和应用锁定/解锁指令；关闭后手机计时、上报和检查点唤醒全部静默。"),
     CapabilityDef("home", "智能家居", "life", "注入 [HOME:...]，让模型可以控制或查询 Home Assistant 设备。"),
     CapabilityDef("band_vibration", "手环呼唤", "life", "注入轻震/呼唤小纸条指令，让模型可以通过小米手环震动并显示一句话。"),
     CapabilityDef(
@@ -73,6 +73,7 @@ CAPABILITY_DEFS: list[CapabilityDef] = [
         "注入当前人物可用状态和小组件/横幅指令；关闭后只停止提示，不阻止指令执行。",
     ),
     CapabilityDef("moment", "发布朋友圈", "social", "注入 [MOMENT:内容|true/false]，让模型可以在合适时发布朋友圈。"),
+    CapabilityDef("pat", "AI 拍拍", "social", "让 AI 自己决定怎么拍：私聊里拍你或自己，群聊里也能拍另一位 AI。关闭只停用 AI 拍拍，你仍可手动拍拍，已有拍拍继续进入聊天上下文。"),
     CapabilityDef("memory_write", "写入记忆", "social", "注入 [MEMORY:内容]，让模型可以记录重要记忆。"),
     CapabilityDef(
         "memory_search",
@@ -386,6 +387,10 @@ async def build_capability_prompt_items(
     if is_capability_enabled("hug_pillow"):
         from hug_pillow_commands import build_hug_pillow_ability_text
         abilities.append(build_hug_pillow_ability_text())
+
+    if "pat" not in excluded_capabilities and is_capability_enabled("pat"):
+        from pat_commands import build_pat_ability_text
+        abilities.append(build_pat_ability_text(who, group=include_private_whisper))
 
     if include_private_whisper and is_capability_enabled("private_whisper"):
         abilities.append(

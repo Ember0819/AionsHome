@@ -89,4 +89,19 @@ assert.doesNotMatch(activity, /id="tabTimeline"/);
 assert.match(home, /funIcon_0031_家庭动态\.png/);
 assert.match(home, /url: '\/family-dynamics'/);
 
+const vm = require('vm');
+const renderContext = {
+  escHtml: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
+  fmtTime: () => '05:03',
+};
+vm.runInNewContext(family.match(/function renderTimelineEvent[\s\S]*?\n}/)[0], renderContext);
+const baseEvent = {kind: 'memory_compression', title: '整理了那天的记忆'};
+const withoutReflection = renderContext.renderTimelineEvent(baseEvent, 0);
+assert.match(withoutReflection, /整理了那天的记忆/);
+assert.doesNotMatch(withoutReflection, /event-reflection/);
+const withReflection = renderContext.renderTimelineEvent({...baseEvent, reflection: '<img src=x onerror=alert(1)>'}, 0);
+assert.match(withReflection, /event-reflection/);
+assert.match(withReflection, /&lt;img/);
+assert.doesNotMatch(withReflection, /<img/);
+
 console.log('family dynamics UI contract passed');

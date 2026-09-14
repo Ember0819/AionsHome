@@ -39,6 +39,35 @@
     : null;
 
   if (parser) {
+    // CommonMark rejects 。**汉字 and 汉字**“ as emphasis boundaries.
+    // Relax only these Han/punctuation boundaries for double stars, leaving
+    // pairing, nested formatting, code and escapes to markdown-it.
+    parser.inline.ruler.before('emphasis', 'chinese_strong', (state, silent) => {
+      if (silent || state.src.charCodeAt(state.pos) !== 0x2A) return false;
+      const scanned = state.scanDelims(state.pos, true);
+      if (scanned.length !== 2) return false;
+      const before = state.src.slice(0, state.pos).match(/.$/u)?.[0] || '';
+      const after = String.fromCodePoint(state.src.codePointAt(state.pos + 2) || 0);
+      const opens = /\p{Script=Han}/u.test(before) && /\p{P}/u.test(after);
+      const closes = /\p{P}/u.test(before) && /\p{Script=Han}/u.test(after);
+      if (!opens && !closes) return false;
+
+      for (let index = 0; index < 2; index += 1) {
+        const token = state.push('text', '', 0);
+        token.content = '*';
+        state.delimiters.push({
+          marker: 0x2A,
+          length: 2,
+          token: state.tokens.length - 1,
+          end: -1,
+          open: scanned.can_open || opens,
+          close: scanned.can_close || closes,
+        });
+      }
+      state.pos += 2;
+      return true;
+    });
+
     const defaultLinkOpen = parser.renderer.rules.link_open
       || ((tokens, index, options, env, renderer) => renderer.renderToken(tokens, index, options));
     parser.renderer.rules.link_open = (tokens, index, options, env, renderer) => {

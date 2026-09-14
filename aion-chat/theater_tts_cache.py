@@ -58,6 +58,22 @@ def delete_message_audio_files(
         candidates.add(cache_dir / f"{safe_id}.mp3")
         candidates.update(path for _, path in list_message_audio_segments(safe_id, cache_dir))
 
+    return _delete_audio_paths(candidates, retry_attempts, retry_delay_seconds)
+
+
+def delete_studio_audio_files(audio_ids: Iterable[str], cache_dir: Path) -> list[Path]:
+    """Remove all chunks for exact studio recording IDs, including uncommitted chunks."""
+    candidates: set[Path] = set()
+    for aid in audio_ids:
+        if not re.fullmatch(r'na_[a-f0-9]{32}', str(aid)):
+            continue
+        pattern = re.compile(rf'{re.escape(aid)}_\d+\.mp3')
+        candidates.update(path for path in Path(cache_dir).glob(f'{aid}_*.mp3')
+                          if pattern.fullmatch(path.name))
+    return _delete_audio_paths(candidates)
+
+
+def _delete_audio_paths(candidates, retry_attempts=3, retry_delay_seconds=0.05):
     deleted: list[Path] = []
     for path in sorted(candidates, key=lambda item: item.name):
         if not path.is_file():

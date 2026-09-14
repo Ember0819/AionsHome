@@ -9,7 +9,7 @@ import httpx, aiosqlite
 
 from config import (
     DATA_DIR, SETTINGS, get_key, get_sentinel_config,
-    load_worldbook, load_chat_status, save_chat_status,
+    load_worldbook, save_chat_status,
 )
 from database import get_db
 from ws import manager
@@ -572,10 +572,7 @@ async def process_heartbeat(lng: float, lat: float, accuracy: float = 0.0, is_gc
 
 
 async def _update_chat_status_location(status: dict):
-    """更新 chat_status 中的位置信息（非状态变化时也调用，保持位置实时）"""
-    old_cs = load_chat_status()
-    old_text = old_cs.get("status", "")
-
+    """将 chat_status 保持为纯位置/天气缓存，避免残留过期聊天摘要。"""
     # 构建位置行
     state_label = {"at_home": "在家", "outside": "外出中"}.get(status["state"], "")
     loc_line = f"[位置] {state_label}"
@@ -594,24 +591,8 @@ async def _update_chat_status_location(status: dict):
         if w.get("humidity"):
             weather_line += f" 湿度{w['humidity']}%"
 
-    # 替换或追加位置/天气信息
-    lines = old_text.split("\n") if old_text else []
-    new_lines = []
-    loc_found = False
-    weather_found = False
-    for line in lines:
-        if line.startswith("[位置]"):
-            new_lines.append(loc_line)
-            loc_found = True
-        elif line.startswith("[天气]"):
-            if weather_line:
-                new_lines.append(weather_line)
-            weather_found = True
-        else:
-            new_lines.append(line)
-    if not loc_found:
-        new_lines.append(loc_line)
-    if not weather_found and weather_line:
+    new_lines = [loc_line]
+    if weather_line:
         new_lines.append(weather_line)
 
     save_chat_status("\n".join(new_lines))
@@ -625,9 +606,6 @@ async def _on_state_change(old_state: str, new_state: str, status: dict, cfg: di
     now_str = time.strftime("%Y年%m月%d日 %H:%M:%S")
 
     # 1. 更新 chat_status
-    old_cs = load_chat_status()
-    old_text = old_cs.get("status", "")
-
     if new_state == "outside":
         event_desc = f"{user_name}离开家外出了"
         if status.get("address"):
@@ -651,23 +629,8 @@ async def _on_state_change(old_state: str, new_state: str, status: dict, cfg: di
         if w.get("humidity"):
             weather_line += f" 湿度{w['humidity']}%"
 
-    lines = old_text.split("\n") if old_text else []
-    new_lines = []
-    loc_found = False
-    weather_found = False
-    for line in lines:
-        if line.startswith("[位置]"):
-            new_lines.append(loc_line)
-            loc_found = True
-        elif line.startswith("[天气]"):
-            if weather_line:
-                new_lines.append(weather_line)
-            weather_found = True
-        else:
-            new_lines.append(line)
-    if not loc_found:
-        new_lines.append(loc_line)
-    if not weather_found and weather_line:
+    new_lines = [loc_line]
+    if weather_line:
         new_lines.append(weather_line)
 
     save_chat_status("\n".join(new_lines))
@@ -697,8 +660,8 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
     now_str = time.strftime("%Y年%m月%d日 %H:%M:%S")
 
     scfg = get_sentinel_config()
-    if not scfg["api_key"]:
-        print("[Location] 哨兵模型 API Key 未配置，跳过哨兵通知")
+    if not scfg.get("ready"):
+        print("[Location] 哨兵模型未就绪，跳过哨兵通知")
         return
 
     last_user_ts = await async_get_last_aion_timeline_user_msg_time()
@@ -706,9 +669,6 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
         time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_user_ts))
         if last_user_ts > 0 else "未知"
     )
-
-    chat_status_data = load_chat_status()
-    chat_status_text = chat_status_data.get("status", "")
 
     recent_logs = read_logs_since(time.time() - 3600 * 6)
     log_history = ""
@@ -739,7 +699,6 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
 {loc_info}
 
 {user_name}最后一次和你说话的时间（私聊+群聊取最新）：{last_user_time_str}
-{user_name}当前状态：{chat_status_text if chat_status_text else "（暂无）"}
 
 最近的聊天记录（已合并私聊+群聊，按时间排列）：
 {recent_chat_text if recent_chat_text else "（暂无）"}
@@ -749,7 +708,7 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
 
 请判断是否需要唤醒Core核心模型主动联系{user_name}。
 判断依据：
-- 如果聊天上下文或状态中已经提到了出门的事，{ai_name}已经知道了，则不需要唤醒
+- 如果最近聊天中已经提到了出门的事，{ai_name}已经知道了，则不需要唤醒
 - 如果{user_name}出门了但对话中没有提到这件事（{ai_name}还不知道），则需要唤醒
 - 如果{user_name}回家了，应主动问候，并欢迎回家。
 - 其他你认为需要主动联系的情况

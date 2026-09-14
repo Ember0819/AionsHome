@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lounge_visit_reporting import _default_save, publish_inbound_report, publish_outbound_report
+from lounge_visit_reporting import _default_generate, _default_save, publish_inbound_report, publish_outbound_report
 
 
 class FakeRepository:
@@ -22,6 +22,30 @@ class FakeRepository:
                 {"direction": "inbound", "content": "我最近开始养花。"},
             ]
         }
+
+
+def test_report_generation_keeps_persona_without_live_chat_history():
+    for actor in ("connor", "aion"):
+        timeline = AsyncMock(return_value=[{"content": "五个角色怎么塞进背景图"}])
+        generate = AsyncMock(return_value="刚才朋友来聊了养花。")
+        with (
+            patch("autonomy._latest_group_room_id", AsyncMock(return_value="group")),
+            patch("autonomy.load_worldbook", return_value={"ai_persona": "喜欢植物"}),
+            patch("chatroom._read_connor_persona", return_value="喜欢植物"),
+            patch("autonomy.fetch_merged_timeline", timeline),
+            patch("autonomy.render_merged_timeline", return_value=[
+                {"role": "user", "content": "五个角色怎么塞进背景图"},
+            ]),
+            patch("autonomy._call_actor", generate),
+        ):
+            result = asyncio.run(_default_generate(actor, "本次对话：朋友说最近开始养花。"))
+
+        assert result == "刚才朋友来聊了养花。"
+        prompt = str(generate.await_args.args[1])
+        assert "喜欢植物" in prompt
+        assert "最近开始养花" in prompt
+        assert "五个角色" not in prompt
+        timeline.assert_not_awaited()
 
 
 def test_default_report_save_disables_tts():

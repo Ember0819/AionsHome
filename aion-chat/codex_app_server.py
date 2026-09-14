@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from generation_control import terminate_process_tree
+
 import asyncio
 import contextlib
 import json
@@ -113,8 +115,7 @@ async def _close_process(process, *, interrupt_turn: tuple[str, str] | None) -> 
         try:
             await asyncio.wait_for(process.wait(), timeout=1.5)
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
+            await terminate_process_tree(process)
             try:
                 await asyncio.wait_for(process.wait(), timeout=1.5)
             except TimeoutError:

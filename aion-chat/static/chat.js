@@ -252,6 +252,7 @@ function formatMsg(s) {
 function toggleConfig(e) {
   e.stopPropagation();
   $("configPopup").classList.toggle("show");
+  if ($('configPopup').classList.contains('show')) refreshTTSVoices();
 }
 document.addEventListener("click", e => {
   const p = $("configPopup");
@@ -823,63 +824,7 @@ const remoteVoice = {
   $('voiceMicSource').value = voiceMicSource;
 })();
 
-// ── 视频通话开关 ──
-async function toggleVideoCallEnabled() {
-  const enabled = $('videoCallToggle').checked;
-  try {
-    await fetch('/api/settings/video-call', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ enabled })
-    });
-  } catch(e) { console.warn('保存视频通话设置失败', e); }
-}
-(async function initVideoCallToggle() {
-  try {
-    const r = await fetch('/api/settings/video-call');
-    const d = await r.json();
-    $('videoCallToggle').checked = !!d.video_call_enabled;
-  } catch(e) {}
-})();
-
-// ── AI 生图开关 ──
-async function toggleImageGenEnabled() {
-  const enabled = $('imageGenToggle').checked;
-  try {
-    await fetch('/api/settings/image-gen', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ enabled })
-    });
-  } catch(e) { console.warn('保存生图设置失败', e); }
-}
-(async function initImageGenToggle() {
-  try {
-    const r = await fetch('/api/settings/image-gen');
-    const d = await r.json();
-    $('imageGenToggle').checked = !!d.image_gen_enabled;
-  } catch(e) {}
-})();
-
-// ── CLI 工具调用开关 ──
-async function toggleSongGenEnabled() {
-  const enabled = $('songGenToggle').checked;
-  try {
-    await fetch('/api/settings/song-gen', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ enabled })
-    });
-  } catch(e) { console.warn('保存歌曲生成设置失败', e); }
-}
-(async function initSongGenToggle() {
-  try {
-    const r = await fetch('/api/settings/song-gen');
-    const d = await r.json();
-    $('songGenToggle').checked = !!d.song_gen_enabled;
-  } catch(e) {}
-})();
-
+// ── CLI 工具调用开关（通话、生图、生歌统一由工具能力管理） ──
 async function toggleGeminiCliTools() {
   const enabled = $('geminiCliToolsToggle').checked;
   try {
@@ -1028,21 +973,10 @@ async function refreshTTSVoices() {
   try {
     const data = await api("GET", "/api/tts/voices");
     const sel = $('ttsVoiceSelect');
-    if (data.voices && data.voices.length > 0) {
-      sel.innerHTML = data.voices.map(v => {
-        const name = v.customName || v.uri || 'Unknown';
-        return `<option value="${v.uri}" ${v.uri === ttsVoiceId ? 'selected' : ''}>${name}</option>`;
-      }).join('');
-      // 如果没有选中的音色，默认选第一个
-      if (!ttsVoiceId || !data.voices.find(v => v.uri === ttsVoiceId)) {
-        ttsVoiceId = data.voices[0].uri;
-        localStorage.setItem('aion_tts_voice', ttsVoiceId);
-        sel.value = ttsVoiceId;
-        _sendTTSState();
-      }
-    } else {
-      sel.innerHTML = '<option value="">无可用音色</option>';
-    }
+    ttsVoiceId = TTSVoices.populate(sel, data.voices || [], ttsVoiceId);
+    sel.title = data.error || '';
+    localStorage.setItem('aion_tts_voice', ttsVoiceId);
+    _sendTTSState();
   } catch(e) {
     console.error('刷新TTS音色失败:', e);
   }
@@ -1252,7 +1186,6 @@ function finishTTSForMsg(msgId, createdAt, targetClientId) {
 }
 
 function _cleanupFinishedTTS() {
-  let cleaned = false;
   while (ttsPlayOrder.length > 0) {
     const msgId = ttsPlayOrder[0];
     const q = ttsChunkQueues[msgId];
@@ -1262,13 +1195,12 @@ function _cleanupFinishedTTS() {
     if (q.nextPlay > maxSeq) {
       ttsPlayOrder.shift();
       delete ttsChunkQueues[msgId];
-      cleaned = true;
     } else {
       break;
     }
   }
-  // 清理后如果播放器空闲，重新触发播放流程（可能会走到"所有播完"逻辑）
-  if (cleaned && !ttsPlaying) {
+  // 收到结束通知后也要唤醒等待缺失分段的队列，让播放器跳过缺段。
+  if (!ttsPlaying) {
     playNextTTSChunk();
   }
 }
@@ -1515,6 +1447,8 @@ function connectWS() {
 }
 
 function handleSync(msg) {
+  if (msg.type === 'generation_stopped') { _chatControl.remoteStop(msg.data); return; }
+  if (!_chatControl.accepts(msg)) return;
   const { type, data } = msg;
 
   if (type === "proactive_companionship_changed") {
@@ -1748,6 +1682,9 @@ function messagesForDisplay(messages) {
   let pendingLegacyNotices = [];
   const list = _dedupeMessagesById(messages || []);
   const indexById = new Map(list.map((m, idx) => [m?.id, idx]));
+  const inlinePats = window.AionPat?.collectInlineNotices(list) || {
+    bySourceId: new Map(), noticeIds: new Set(),
+  };
 
   function appendPendingFor(id) {
     const pending = pendingById.get(id);
@@ -1763,6 +1700,7 @@ function messagesForDisplay(messages) {
 
   for (let idx = 0; idx < list.length; idx++) {
     const m = list[idx];
+    if (m?.id && inlinePats.noticeIds.has(String(m.id))) continue;
     const afterMsgId = systemNoticeAfterMsgId(m);
     if (afterMsgId && indexById.has(afterMsgId) && idx < indexById.get(afterMsgId)) {
       if (!pendingById.has(afterMsgId)) pendingById.set(afterMsgId, []);
@@ -1779,7 +1717,8 @@ function messagesForDisplay(messages) {
       out.push(...pendingLegacyNotices);
       pendingLegacyNotices = [];
     }
-    out.push(m);
+    const notices = m?.id ? inlinePats.bySourceId.get(String(m.id)) : null;
+    out.push(notices?.length ? {...m, _inlinePatNotices: notices} : m);
     if (m?.role === "assistant") appendPendingFor(m.id);
   }
   if (pendingLegacyNotices.length) out.push(...pendingLegacyNotices);
@@ -1825,6 +1764,7 @@ function renderConvList() {
 }
 
 function privateSystemMessageHTML(m, nextMessage = null) {
+  const pat = window.AionPat?.isPat(m);
   const loungeStatus = window.LoungeVisitUI && window.LoungeVisitUI.isStatusMessage(m);
   const afterMsgId = systemNoticeAfterMsgId(m);
   const beforeMsgId = systemNoticeBeforeMsgId(m, nextMessage);
@@ -1842,11 +1782,11 @@ function privateSystemMessageHTML(m, nextMessage = null) {
         },
       )
     : "";
-  const contentHtml = snapshotHtml || (window.SystemNoticeUI
+  const contentHtml = pat ? `<span class="pat-text">${escHtml(m.content || '')}</span>` : snapshotHtml || (window.SystemNoticeUI
     ? window.SystemNoticeUI.renderSystemNoticeContent(displayContent, {escapeHtml: escHtml})
     : `<span class="system-notice-text">${escHtml(displayContent)}</span>`);
   return `
-  <div class="msg-row system${loungeStatus ? ' lounge-visit-status-line' : ''}" id="m_${m.id}" data-msg-id="${m.id}" tabindex="0" onclick="this.focus()"${afterAttr}${beforeAttr}>
+  <div class="msg-row system${pat ? ' pat-notice' : ''}${loungeStatus ? ' lounge-visit-status-line' : ''}" id="m_${m.id}" data-msg-id="${m.id}" tabindex="0" onclick="this.focus()"${afterAttr}${beforeAttr}>
     <div class="system-notice">
       <span class="system-notice-marker" aria-hidden="true">&gt;</span>
       ${contentHtml}
@@ -1911,6 +1851,18 @@ function privateMessageContentItems(value, isUser = false) {
   return items;
 }
 
+function privateMessageContentItemsWithInlinePats(value, isUser, notices) {
+  if (isUser || !notices?.length || !window.AionPat?.interleaveContent) {
+    return privateMessageContentItems(value, isUser);
+  }
+  const items = [];
+  for (const part of window.AionPat.interleaveContent(value, notices)) {
+    if (part.type === 'notice') items.push({type: 'pat_notice', message: part.message});
+    else items.push(...privateMessageContentItems(part.text, isUser));
+  }
+  return items;
+}
+
 function renderPrivateMessageHTML(m) {
   const isUser = m.role === 'user';
   const isAssistant = m.role === 'assistant';
@@ -1934,10 +1886,12 @@ function renderPrivateMessageHTML(m) {
   const hasWishFulfillmentAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'wish_fulfillment');
   const hasStandaloneCard = messageAttachments.some(a => typeof a === 'object' && (a.type === 'date_summary' || a.type === 'lounge_visit_report'));
   const isEmptyMessage = !displayContent && messageAttachments.length === 0;
-  const items = privateMessageContentItems(displayContent, isUser);
-  const textHtml = items.map(item => item.type === 'monologue'
-    ? `<div class="inner-monologue-line"><div class="inner-monologue-content markdown-body">${privateMarkdownMessageHtml(item.text, isUser)}</div></div>`
-    : `<div class="${isUser ? 'msg-bubble' : 'private-ai-message-content'} markdown-body">${privateMarkdownMessageHtml(item.text, isUser)}</div>`
+  const items = privateMessageContentItemsWithInlinePats(displayContent, isUser, m._inlinePatNotices);
+  const textHtml = items.map(item => item.type === 'pat_notice'
+    ? privateSystemMessageHTML(item.message)
+    : item.type === 'monologue'
+      ? `<div class="inner-monologue-line"><div class="inner-monologue-content markdown-body">${privateMarkdownMessageHtml(item.text, isUser)}</div></div>`
+      : `<div class="${isUser ? 'msg-bubble' : 'private-ai-message-content'} markdown-body">${privateMarkdownMessageHtml(item.text, isUser)}</div>`
   ).join('');
   let contentHtml = textHtml;
   if (hasStandaloneCard) {
@@ -1953,7 +1907,7 @@ function renderPrivateMessageHTML(m) {
   const avatarSrc = isUser ? '/public/UserIcon.png' : '/public/AIIcon.png';
   const ttsBtn = !isUser ? `<button class="tts-replay-btn" onclick="replayTTS('${m.id}')" title="重听语音">🔊</button>` : '';
   const roleRow = `<div class="msg-role-row">${dotsLeft}<span class="msg-role-name">${escHtml(roleLabel)}</span><span class="msg-time">${time}</span>${dotsRight}${feedbackHtml}${ttsBtn}${starBadge}<div class="msg-menu" id="menu_${m.id}">${actionsHtml}</div></div>`;
-  const avatar = `<div class="msg-avatar-col"><img class="msg-avatar" src="${avatarSrc}" alt=""></div>`;
+  const avatar = `<div class="msg-avatar-col"><img class="msg-avatar" src="${avatarSrc}" alt="" data-pat-target="${isUser ? 'user' : 'aion'}" role="button" tabindex="0" title="双击拍拍" aria-label="双击拍拍" draggable="false"></div>`;
   const header = isUser ? `${roleRow}${avatar}` : `${avatar}${roleRow}`;
   return `
   <div class="msg-row ${m.role}${isEmptyMessage ? ' empty-message' : ''}" id="m_${m.id}" data-msg-id="${m.id}" tabindex="0" onclick="MessageRowFocus.focusRowFromClick(event, this)">
@@ -2840,36 +2794,68 @@ function renameCurrent() {
 
 // ── 发送/停止按钮切换 ──
 function handleSendBtn() {
-  if (sending) { stopGeneration(); } else { send(); }
+  if (sending || _chatControl.active || _chatControl.retryStop) { stopGeneration(); } else { send(); }
 }
 
 function _showStopBtn() {
   const btn = $("sendBtn");
   btn.disabled = false;
   btn.classList.add('stop-mode');
+  btn.title = '停止本次回复';
+  btn.setAttribute('aria-label', '停止本次回复');
   btn.innerHTML = '■';
 }
 
 function _showSendBtn() {
+  if (_chatControl.active || _chatControl.retryStop) { _showStopBtn(); return; }
   const btn = $("sendBtn");
   btn.classList.remove('stop-mode');
+  btn.title = '发送';
+  btn.setAttribute('aria-label', '发送');
   btn.innerHTML = '➤';
   btn.disabled = false;
 }
 
 function _updateSendBtnState() {
-  if (sending) return;
+  if (sending || _chatControl.active || _chatControl.retryStop) return;
   const btn = $("sendBtn");
   btn.disabled = !$("input").value.trim() && !pendingAttachments.length;
 }
 
+const _chatControl = new ChatGenerationControl({
+  surface: 'private',
+  baseUrl: id => `/api/conversations/${encodeURIComponent(id)}`,
+  onStart: () => _showStopBtn(),
+  onStop(generation) {
+    generation.messageIds.forEach(suppressTTSMsg);
+    stopLiveTTSQueue();
+    sending = false;
+    _abortController = null;
+    _stopTypingAnim();
+    streamingAiId = null;
+    currentMessages = currentMessages.filter(m => !((generation.messageIds.has(m.id) || m.id === 'temp_edit_thinking') && m.content === '...'));
+    renderMessages();
+    _showStopBtn();
+    $('sendBtn').title = '确认后台停止';
+  },
+  onFinish: () => _showSendBtn(),
+  onReconcile(generation, result) {
+    const ids = result.message_ids || [];
+    ids.forEach(suppressTTSMsg);
+    if (ttsPlayOrder.some(id => ids.includes(id))) stopLiveTTSQueue();
+    if (currentConvId !== generation.target) return;
+    (result.messages || []).forEach(upsertCurrentMessage);
+    renderMessages();
+  },
+  onError(message) {
+    if (!_chatControl.active) _showStopBtn();
+    $('sendBtn').title = message;
+    addErrorToSystemLog(message);
+  },
+});
+
 async function stopGeneration() {
-  // 1. 中断前端 fetch 连接
-  if (_abortController) { _abortController.abort(); _abortController = null; }
-  // 2. 通知后端停止生成
-  if (currentConvId) {
-    try { await fetch(`/api/conversations/${currentConvId}/abort`, { method: 'POST' }); } catch {}
-  }
+  await _chatControl.stop();
 }
 
 function _getMaxTokens() {
@@ -2897,16 +2883,17 @@ async function send() {
   upsertCurrentMessage(tempUserMsg);
   renderMessages();
 
-  _abortController = new AbortController();
+  const generation = _chatControl.begin(currentConvId);
+  _abortController = generation.controller;
   try {
     const contextLimit = parseInt($("contextSlider").value) || 30;
     const temperature = parseFloat($("tempSlider").value);
     const maxTokens = _getMaxTokens();
-    const res = await fetch(`/api/conversations/${currentConvId}/send`, {
+    const res = await _chatControl.fetch(generation, `/api/conversations/${currentConvId}/send`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ content: text, context_limit: contextLimit, attachments, whisper_mode: whisperMode, temperature, max_tokens: maxTokens, tts_enabled: ttsEnabled, tts_voice: ttsVoiceId, client_id: _clientId }),
-      signal: _abortController.signal
+      signal: generation.controller.signal
     });
 
     await _processSSEStream(res);
@@ -2927,14 +2914,18 @@ async function send() {
       }
     }
   } finally {
-    sending = false;
-    streamingAiId = null;
-    _abortController = null;
-    _showSendBtn();
+    if (_chatControl.isCurrent(generation)) {
+      sending = false;
+      streamingAiId = null;
+      _abortController = null;
+      _showSendBtn();
+      _chatControl.finish(generation);
+    }
   }
 }
 
 async function _processSSEStream(res) {
+    const generation = res.chatGeneration;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let aiMsgId = null;
@@ -2952,6 +2943,7 @@ async function _processSSEStream(res) {
         if (!line.startsWith("data: ")) continue;
         try {
           const data = JSON.parse(line.slice(6));
+          if (!_chatControl.accepts(data, generation)) continue;
           if (data.type === "start") {
             aiMsgId = data.id;
             const existing = currentMessages.find(m => m.id === aiMsgId);
@@ -3077,16 +3069,17 @@ async function saveEdit(id) {
   upsertCurrentMessage({ id: tempAiId, conv_id: currentConvId, role: 'assistant', content: '...', created_at: Date.now()/1000 });
   renderMessages();
   _startTypingAnim(tempAiId);
-  _abortController = new AbortController();
+  const generation = _chatControl.begin(currentConvId);
+  _abortController = generation.controller;
   try {
     const contextLimit = parseInt($('contextSlider').value) || 30;
     const temperature = parseFloat($('tempSlider').value);
     const maxTokens = _getMaxTokens();
-    const res = await fetch(`/api/messages/${id}/edit-resend`, {
+    const res = await _chatControl.fetch(generation, `/api/messages/${id}/edit-resend`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ content: newText, context_limit: contextLimit, whisper_mode: whisperMode, temperature, max_tokens: maxTokens, tts_enabled: ttsEnabled, tts_voice: ttsVoiceId, client_id: _clientId }),
-      signal: _abortController.signal
+      signal: generation.controller.signal
     });
 
     if (!res.ok) {
@@ -3117,6 +3110,7 @@ async function saveEdit(id) {
         if (!line.startsWith('data: ')) continue;
         try {
           const data = JSON.parse(line.slice(6));
+          if (!_chatControl.accepts(data, generation)) continue;
           if (data.type === 'start') {
             _stopTypingAnim();
             // 替换临时思考占位为真正的 AI 消息
@@ -3203,10 +3197,13 @@ async function saveEdit(id) {
       renderMessages();
     }
   } finally {
-    sending = false;
-    streamingAiId = null;
-    _abortController = null;
-    _showSendBtn();
+    if (_chatControl.isCurrent(generation)) {
+      sending = false;
+      streamingAiId = null;
+      _abortController = null;
+      _showSendBtn();
+      _chatControl.finish(generation);
+    }
   }
 }
 
@@ -3224,15 +3221,16 @@ async function regenerateMsg(aiMsgId) {
   sending = true;
   _showStopBtn();
 
-  _abortController = new AbortController();
+  const generation = _chatControl.begin(currentConvId);
+  _abortController = generation.controller;
   try {
     const cl = parseInt($("contextSlider").value) || 30;
     const temperature = parseFloat($("tempSlider").value);
     const maxTokens = _getMaxTokens();
     const mtParam = maxTokens ? `&max_tokens=${maxTokens}` : '';
-    const res = await fetch(`/api/conversations/${currentConvId}/regenerate?context_limit=${cl}&whisper_mode=${whisperMode}&temperature=${temperature}${mtParam}&tts_enabled=${ttsEnabled}&tts_voice=${encodeURIComponent(ttsVoiceId)}`, {
+    const res = await _chatControl.fetch(generation, `/api/conversations/${currentConvId}/regenerate?context_limit=${cl}&whisper_mode=${whisperMode}&temperature=${temperature}${mtParam}&tts_enabled=${ttsEnabled}&tts_voice=${encodeURIComponent(ttsVoiceId)}`, {
       method: "POST", headers: {"Content-Type": "application/json"},
-      signal: _abortController.signal
+      signal: generation.controller.signal
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -3248,6 +3246,7 @@ async function regenerateMsg(aiMsgId) {
         if (!line.startsWith("data: ")) continue;
         try {
           const d = JSON.parse(line.slice(6));
+          if (!_chatControl.accepts(d, generation)) continue;
           if (d.type === "start") {
             newId = d.id;
             streamingAiId = newId;
@@ -3317,9 +3316,12 @@ async function regenerateMsg(aiMsgId) {
       addErrorToSystemLog(`重新生成失败: ${err.message || err}`, $("modelSelect")?.value);
     }
   } finally {
-    sending = false;
-    _abortController = null;
-    _showSendBtn();
+    if (_chatControl.isCurrent(generation)) {
+      sending = false;
+      _abortController = null;
+      _showSendBtn();
+      _chatControl.finish(generation);
+    }
   }
 }
 
@@ -4795,26 +4797,30 @@ async function _voiceSendMessage(audioBlob, duration) {
   renderMessages();
   scrollBottom();
 
-  _abortController = new AbortController();
+  const generation = _chatControl.begin(currentConvId);
+  _abortController = generation.controller;
   try {
     const contextLimit = parseInt($("contextSlider").value) || 30;
     const temperature = parseFloat($("tempSlider").value);
     const maxTokens = _getMaxTokens();
-    const res = await fetch(`/api/conversations/${currentConvId}/send`, {
+    const res = await _chatControl.fetch(generation, `/api/conversations/${currentConvId}/send`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ content: "", context_limit: contextLimit, attachments, whisper_mode: whisperMode, temperature, max_tokens: maxTokens, tts_enabled: ttsEnabled, tts_voice: ttsVoiceId, client_id: _clientId }),
-      signal: _abortController.signal
+      signal: generation.controller.signal
     });
     // 复用和 send() 完全相同的 SSE 处理逻辑
     await _processSSEStream(res);
   } catch (err) {
     if (err.name !== 'AbortError') console.error('[VoiceMsg] Send error:', err);
   } finally {
-    sending = false;
-    streamingAiId = null;
-    _abortController = null;
-    _showSendBtn();
+    if (_chatControl.isCurrent(generation)) {
+      sending = false;
+      streamingAiId = null;
+      _abortController = null;
+      _showSendBtn();
+      _chatControl.finish(generation);
+    }
   }
 }
 
@@ -5580,7 +5586,7 @@ function getSubPageFrame(url) {
   const path = subPagePath(url);
   if (!isPersistentSubPage(path)) {
     // 相册的原图下载需要单独允许；不改变其他子页面的沙箱权限。
-    if (path === '/album') transientSubPageFrame.sandbox.add('allow-downloads');
+    if (path === '/album' || path === '/theater') transientSubPageFrame.sandbox.add('allow-downloads');
     else transientSubPageFrame.sandbox.remove('allow-downloads');
     if (transientSubPageFrame.dataset.startupFrame === '1'
         && transientSubPageFrame.src === new URL(url, location.origin).href) {
@@ -5595,6 +5601,7 @@ function getSubPageFrame(url) {
     frame = document.createElement('iframe');
     frame.className = 'sub-page-frame';
     frame.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-forms allow-popups allow-modals');
+    if (path === '/theater') frame.sandbox.add('allow-downloads');
     frame.setAttribute('allow', 'autoplay');
     frame.dataset.persistentPath = path;
     attachSubPageFrameLoad(frame);
@@ -5772,4 +5779,12 @@ function closeWalletPanel() {
 }
 
 // All page/frame state above must exist before opening the initial desktop.
+window.AionPat?.bind({
+  container: $('messages'),
+  getContext: () => ({
+    scope: 'private', source_id: currentConvId,
+    names: { user: worldBook.user_name || '你', aion: worldBook.ai_name || 'AI' },
+  }),
+  onSent: message => handleSync({ type: 'msg_created', data: message }),
+});
 startChatApp();

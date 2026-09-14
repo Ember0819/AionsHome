@@ -63,6 +63,7 @@ public class WebViewActivity extends AppCompatActivity
     private static final int REQ_AUDIO = 1001;
     private static final int REQ_CAMERA = 1002;
     private WebView webView;
+    private android.app.Dialog attentionCallDialog;
     private SharedAssetCache sharedAssetCache;
     private MediaCacheStore mediaCacheStore;
     private SharedJsonStore sharedJsonStore;
@@ -314,6 +315,7 @@ public class WebViewActivity extends AppCompatActivity
                 }
             }
         }, "AionImageSaver");
+        webView.addJavascriptInterface(new RepairFileBridge(this, targetUrl), "AionRepairFiles");
 
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
@@ -891,11 +893,41 @@ public class WebViewActivity extends AppCompatActivity
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (!intent.hasExtra(AttentionCall.EXTRA_MESSAGE)) return;
+        setIntent(intent);
+        String callUrl = intent.getStringExtra("url");
+        if (callUrl != null && webView != null) {
+            targetUrl = WebViewLaunchPolicy.toShellUrl(callUrl);
+            pageLoaded = false;
+            sharedAssetCache.freezeForPageLoad();
+            webView.loadUrl(targetUrl);
+        }
+        if (attentionCallDialog != null) {
+            attentionCallDialog.dismiss();
+            attentionCallDialog = null;
+        }
+        if (activityResumed) showAttentionCall();
+    }
+
+    private void showAttentionCall() {
+        if (isFinishing() || attentionCallDialog != null) return;
+        String message = getIntent().getStringExtra(AttentionCall.EXTRA_MESSAGE);
+        if (message == null || message.trim().isEmpty()) return;
+        attentionCallDialog = AttentionCallDialog.show(this, message, () -> {
+            getIntent().removeExtra(AttentionCall.EXTRA_MESSAGE);
+            attentionCallDialog = null;
+        });
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         AppSupervisionRuntime runtime = AppSupervisionRuntime.get();
         if (runtime != null) runtime.onAionsHomeForegroundChanged(true);
         activityResumed = true;
+        showAttentionCall();
         setNativeCameraForeground(true);
         // 告诉推送服务：前台已打开，不需要弹通知
         notifyServiceForeground(true);
@@ -1092,6 +1124,7 @@ public class WebViewActivity extends AppCompatActivity
 
     @Override
     protected void onDestroy() {
+        if (attentionCallDialog != null) attentionCallDialog.dismiss();
         mainHandler.removeCallbacksAndMessages(null);
         PhoneCameraPreviewCoordinator.shared().unregister(this);
         releasePhoneCameraPreview();

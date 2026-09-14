@@ -129,6 +129,7 @@ async def acknowledge_command(body: CommandAck):
 
 
 async def _publish_command_result(command: dict, *, success: bool, reason: str):
+    from config import load_worldbook
     role_names = {item["id"]: item["label"] for item in role_catalog()}
     snapshot, _ = supervision_state_cache.read()
     group_names = {
@@ -142,6 +143,7 @@ async def _publish_command_result(command: dict, *, success: bool, reason: str):
         reason=reason,
         role_names=role_names,
         group_names=group_names,
+        user_name=load_worldbook().get("user_name") or "用户",
     )
     from schedule import _chatroom_sys_msg, _sys_msg
     if "chatroom" in command["sourceKind"]:

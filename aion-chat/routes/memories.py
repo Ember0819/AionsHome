@@ -24,6 +24,7 @@ from memory_compression import (
     create_calendar_compression_job,
     get_calendar_compression_job,
     list_latest_calendar_compression_jobs,
+    list_compression_history,
     resolve_source_message_ids,
     run_calendar_compression,
 )
@@ -517,6 +518,13 @@ async def latest_calendar_compression_jobs(target: str = "main"):
         "ok": True,
         "jobs": await list_latest_calendar_compression_jobs(target),
     }
+
+
+@router.get("/api/memories/calendar-compression/history")
+async def calendar_compression_history(
+    target: str = "main", limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)
+):
+    return {"ok": True, **await list_compression_history(target, limit=limit, offset=offset)}
 
 
 @router.post("/api/memories/calendar-compression/jobs")

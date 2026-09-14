@@ -12,6 +12,36 @@ import static org.junit.Assert.assertTrue;
 
 public class AppSupervisionRuntimePolicyTest {
     @Test
+    public void comeHomeDoesNotLockAndLookAtMeReusesDeviceFocus() {
+        Harness harness = new Harness(true);
+        long future = harness.scheduler.currentTimeMillis() + 300_000L;
+        assertTrue(harness.runtime.applyAiCommand(
+                "come_home", "", 0, "connor", "回来陪我", "call-1", future).isSuccess());
+        assertEquals(EffectiveState.NORMAL, harness.runtime.deviceSnapshot().getEffectiveState());
+
+        assertTrue(harness.runtime.applyAiCommand(
+                "look_at_me", "", 5, "connor", "陪我五分钟", "call-2", future).isSuccess());
+        long deadline = harness.runtime.deviceSnapshot().getLock().getDeadlineElapsedMs();
+        harness.runtime.onAionsHomeForegroundChanged(true);
+        assertEquals(SupervisionOverlayDecision.Mode.HIDDEN, harness.overlay.lastMode);
+        assertEquals(EffectiveState.LOCKED, harness.runtime.deviceSnapshot().getEffectiveState());
+
+        assertTrue(harness.runtime.applyAiCommand(
+                "come_home", "", 0, "connor", "再看看我", "call-3", future).isSuccess());
+        assertEquals(deadline, harness.runtime.deviceSnapshot().getLock().getDeadlineElapsedMs());
+        harness.scheduler.advanceMinutes(1);
+        assertTrue(harness.runtime.applyAiCommand(
+                "look_at_me", "", 5, "connor", "陪我五分钟", "call-2", future).isSuccess());
+        assertEquals(deadline, harness.runtime.deviceSnapshot().getLock().getDeadlineElapsedMs());
+
+        harness.runtime.onAionsHomeForegroundChanged(false);
+        harness.runtime.onPackageForeground("com.example.main");
+        assertEquals(SupervisionOverlayDecision.Mode.DEVICE_LOCK, harness.overlay.lastMode);
+        harness.scheduler.advanceMinutes(4);
+        assertEquals(EffectiveState.NORMAL, harness.runtime.deviceSnapshot().getEffectiveState());
+    }
+
+    @Test
     public void accessibilityEventsStayEventDrivenAndScreenOffIsSilentUntilUserPresent() {
         Harness harness = new Harness(true);
         harness.runtime.onAccessibilityConnected();

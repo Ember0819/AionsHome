@@ -881,6 +881,39 @@ body[data-theme="light"] .link-preview-card:hover {
 .tts-voice-row { display:flex; align-items:center; gap:8px; margin:6px 0; }
 .tts-voice-row label { font-size:12px; color:var(--text2); white-space:nowrap; min-width:50px; }
 .tts-voice-row select { flex:1; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 6px; font-size:12px; outline:none; }
+.private-voice-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.private-voice-heading .cam-section-title { margin: 0; }
+.voice-library-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.voice-library-btn:hover { color: var(--text); border-color: var(--accent); }
+.tts-voice-row select { min-width: 0; width: 0; min-height: 36px; text-overflow: ellipsis; }
+.voice-refresh-btn {
+  flex: 0 0 32px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: 20px;
+  cursor: pointer;
+}
+.private-advanced-settings summary { min-height: 32px; padding: 6px 0; color: var(--text2); font-size: 12px; cursor: pointer; }
+.private-advanced-settings .cam-toggle-row { padding-top: 8px; }
+.voice-library-btn:focus-visible,
+.voice-refresh-btn:focus-visible,
+.private-advanced-settings summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── 摄像头预览窗 ── */
 .cam-modal { max-width:680px; max-height:85vh; display:flex; flex-direction:column; }

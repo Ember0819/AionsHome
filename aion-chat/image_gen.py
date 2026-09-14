@@ -3,7 +3,7 @@ AI 生图模块：可配置 OpenAI 兼容接口，未配置时沿用 Gemini
 支持 SELFIE（带参考图）和 DRAW（纯文本）两种模式
 """
 
-import base64, re
+import base64, re, mimetypes
 from pathlib import Path
 
 import httpx
@@ -49,9 +49,15 @@ def _openai_image_source(data: dict) -> str | None:
 
 
 async def _generate_openai_image(prompt: str, is_selfie: bool, source_identity: str,
-                                 base_url: str, api_key: str, model: str) -> str | None:
+                                 base_url: str, api_key: str, model: str, references=None) -> str | None:
     try:
         content = [{"type": "text", "text": prompt}]
+        for ref in references or []:
+            path = Path(ref['path'])
+            mime = mimetypes.guess_type(path.name)[0] or 'image/jpeg'
+            encoded = base64.b64encode(path.read_bytes()).decode('ascii')
+            content.extend([{'type': 'text', 'text': f"下面的参考照片对应人物：{ref['name']}。保持此人的面部特征，不与其他角色混淆。"},
+                            {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{encoded}'}}])
         reference_bytes = None
         if is_selfie:
             reference = _selfie_reference_path(source_identity)
@@ -101,7 +107,7 @@ async def _generate_openai_image(prompt: str, is_selfie: bool, source_identity: 
     return None
 
 
-async def generate_image(prompt: str, is_selfie: bool = False, source_identity: str = "") -> str | None:
+async def generate_image(prompt: str, is_selfie: bool = False, source_identity: str = "", *, references=None) -> str | None:
     """
     调用设置中的生图模型，未配置时使用 Gemini；保存到相册并返回 uploads 相对路径。
     is_selfie=True 时自动附带参考图。
@@ -113,6 +119,8 @@ async def generate_image(prompt: str, is_selfie: bool = False, source_identity: 
         if not all(custom):
             print("[image_gen] 请完整填写生图 API 地址、Key 和模型名，或全部清空以使用 Gemini")
             return None
+        if references:
+            return await _generate_openai_image(prompt, is_selfie, source_identity, *custom, references=references)
         return await _generate_openai_image(prompt, is_selfie, source_identity, *custom)
 
     api_key = get_key("gemini")
@@ -122,6 +130,11 @@ async def generate_image(prompt: str, is_selfie: bool = False, source_identity: 
 
     # 构建请求内容
     parts = [{"text": prompt}]
+    for ref in references or []:
+        path = Path(ref['path'])
+        parts.extend([{'text': f"参考照片对应人物：{ref['name']}。保持面部特征。"},
+                      {'inlineData': {'mimeType': mimetypes.guess_type(path.name)[0] or 'image/jpeg',
+                                      'data': base64.b64encode(path.read_bytes()).decode('ascii')}}])
 
     # SELFIE 模式：附带参考图
     ref_bytes = None

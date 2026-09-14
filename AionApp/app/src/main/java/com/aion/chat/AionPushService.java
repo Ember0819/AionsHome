@@ -2422,6 +2422,25 @@ public class AionPushService extends Service {
         com.aion.chat.supervision.AppSupervisionRuntime.CommandResult result =
                 runtime.applyAiCommand(action, groupId, minutes, roleId, message,
                         commandId, expiresWallMs);
+        if (result.isSuccess() && AttentionCall.isAttentionAction(action)) {
+            try {
+                String base = getHttpBase();
+                if (base == null || base.isEmpty()) throw new IllegalStateException("missing_server");
+                Intent intent = new Intent(this, WebViewActivity.class);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                intent.putExtra("url", base + AttentionCall.conversationPath(
+                        data.optString("sourceKind", ""), data.optString("sourceRef", "")));
+                intent.putExtra(AttentionCall.EXTRA_MESSAGE, message);
+                startActivity(intent);
+            } catch (Exception error) {
+                String reason = "look_at_me".equals(action)
+                        ? "专注已开启，但打开聊天失败，请手动返回小家" : "打开聊天失败，请手动返回小家";
+                storeAppSupervisionResult(commandId, false, reason);
+                ackAppSupervisionCommand(commandId, false, reason);
+                return;
+            }
+        }
         storeAppSupervisionResult(commandId, result.isSuccess(), result.getReason());
         ackAppSupervisionCommand(commandId, result.isSuccess(), result.getReason());
     }

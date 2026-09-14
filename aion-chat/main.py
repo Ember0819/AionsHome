@@ -54,6 +54,7 @@ from routes import fund as fund_routes
 from routes import wallpaper as wallpaper_routes
 from routes import playground as playground_routes
 from routes import chatroom as chatroom_routes
+from routes import pat as pat_routes
 from routes import doudizhu as doudizhu_routes
 from routes import seeky as seeky_routes
 from routes import wallet as wallet_routes
@@ -81,6 +82,7 @@ from routes.security_access_report import create_security_access_report_router
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from memory_compression import migrate_legacy_daily_capsules
+from memory_compression_scheduler import auto_calendar_compression_loop
 from chatroom import _connor_1v1_auto_digest_loop
 from fund import fund_scheduler
 from music_station import init_music_station
@@ -185,6 +187,7 @@ async def lifespan(app: FastAPI):
     # 自动记忆总结定时任务
     digest_task = asyncio.create_task(_auto_digest_loop())
     cr_digest_task = asyncio.create_task(_connor_1v1_auto_digest_loop())
+    compression_task = asyncio.create_task(auto_calendar_compression_loop())
     persona_evolution_task = asyncio.create_task(main_ai_persona_evolution_loop())
     connor_persona_evolution_task = asyncio.create_task(connor_persona_evolution_loop())
     idle_autonomy_mgr.start()
@@ -202,6 +205,8 @@ async def lifespan(app: FastAPI):
     persona_evolution_task.cancel()
     cr_digest_task.cancel()
     digest_task.cancel()
+    compression_task.cancel()
+    await asyncio.gather(compression_task, return_exceptions=True)
     fund_scheduler.stop()
     pc_display_tracker.stop()
     pc_tracker.stop()
@@ -211,6 +216,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# 维修室 owns its routes and independent worker; companion chat is unchanged.
+from repair_routes import router as repair_router
+app.include_router(repair_router)
 
 # Static files keep their existing URLs, so browsers must revalidate them. The
 # Android app additionally uses /api/client-assets to share verified objects
@@ -277,6 +286,7 @@ app.include_router(fund_routes.router)
 app.include_router(wallpaper_routes.router)
 app.include_router(playground_routes.router)
 app.include_router(chatroom_routes.router)
+app.include_router(pat_routes.router)
 app.include_router(doudizhu_routes.router)
 app.include_router(seeky_routes.router)
 app.include_router(wallet_routes.router)
@@ -338,6 +348,10 @@ async def taobao_page():
 @app.get("/settings")
 async def settings_page():
     return FileResponse(BASE_DIR / "static" / "settings.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/tts-test")
+async def tts_test_page():
+    return FileResponse(BASE_DIR / "static" / "tts-test.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/lounge-friends")
 async def lounge_friends_page():

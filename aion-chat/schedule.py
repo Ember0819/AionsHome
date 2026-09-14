@@ -15,6 +15,7 @@ from database import get_db
 from ws import manager
 from band_commands import process_band_vibration, with_band_vibration_attachment
 from hug_pillow_commands import process_hug_pillow_commands
+from pat_commands import process_pat_commands
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories, format_recalled_memories_for_prompt
 from music import search_songs, get_audio_url
@@ -1417,6 +1418,10 @@ async def _process_background_reply_commands(
     )
     target_type = "chatroom" if (target or {}).get("type") == "chatroom" else "private"
     source_id = (target or {}).get("room_id") if target_type == "chatroom" else conv_id
+    cleaned = await process_pat_commands(
+        cleaned, source_type=target_type, source_id=source_id or "",
+        sender=sender, source_msg_id=ai_msg_id,
+    )
     cleaned = await process_band_vibration(
         cleaned,
         source_type=f"background_{target_type}",

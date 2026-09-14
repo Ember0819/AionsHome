@@ -308,7 +308,7 @@ body[data-theme="light"] .diary-input {
 <script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js?v=diary-back-20260621"></script>
 <script src="/static/vendor/markdown-it-15.0.1.min.js?v=15.0.1"></script>
-<script src="/static/chatroom-markdown.js?v=social-markdown-20260904"></script>
+<script src="/static/chatroom-markdown.js?v=chinese-strong-20260906"></script>
 <script>
 const DIARY_THEME_KEY = 'aion_chat_theme';
 function applyDiaryTheme(theme) {
@@ -329,6 +329,8 @@ let currentPage = 1;
 let totalItems = 0;
 let currentAuthor = '';
 let allItems = [];
+let diaryRequestId = 0;
+let diaryLoading = false;
 let editingDiaryId = null;
 let expandedDiaryIds = new Set();
 let nameMap = { user: '我', aion: 'AI', connor: 'Connor' };
@@ -352,15 +354,21 @@ async function initNames() {
 }
 
 async function loadDiaries(page = 1, append = false) {
+  if (append && diaryLoading) return;
+  const requestId = ++diaryRequestId;
+  diaryLoading = true;
   try {
     const authorParam = currentAuthor ? `&author=${encodeURIComponent(currentAuthor)}` : '';
     const res = await api('GET', `/api/diaries?page=${page}&page_size=${PAGE_SIZE}${authorParam}`);
+    if (requestId !== diaryRequestId) return;
     totalItems = res.total;
     allItems = append ? allItems.concat(res.items) : res.items;
     currentPage = page;
     renderList();
   } catch(e) {
     console.error('加载日记失败:', e);
+  } finally {
+    if (requestId === diaryRequestId) diaryLoading = false;
   }
 }
 
@@ -465,12 +473,14 @@ function toggleDiary(id) {
 }
 
 function upsertDiary(item) {
+  if (diaryLoading) void loadDiaries();
   if (currentAuthor && item.author !== currentAuthor) return;
   const idx = allItems.findIndex(i => String(i.id) === String(item.id));
   if (idx >= 0) {
     allItems[idx] = item;
   } else {
     allItems.unshift(item);
+    allItems.sort((a, b) => b.created_at - a.created_at);
     totalItems++;
   }
   renderList();
@@ -572,6 +582,7 @@ async function deleteDiary(id) {
   if (!confirm('确定删除这篇日记吗？')) return;
   try {
     await api('DELETE', `/api/diaries/${id}`);
+    if (diaryLoading) void loadDiaries();
     stopDiaryTts(id);
     allItems = allItems.filter(i => String(i.id) !== String(id));
     expandedDiaryIds.delete(String(id));
@@ -633,23 +644,9 @@ async function saveDiary() {
 }
 
 function connectDiaryWS() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onmessage = e => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'diary_new' && msg.data) {
-        upsertDiary(msg.data);
-      } else if (msg.type === 'diary_updated' && msg.data) {
-        const idx = allItems.findIndex(i => String(i.id) === String(msg.data.id));
-        if (idx >= 0) {
-          allItems[idx] = msg.data;
-          renderList();
-        }
-      }
-    } catch {}
-  };
-  ws.onclose = () => setTimeout(connectDiaryWS, 1500);
+  connectCommonWS(msg => {
+    if (['diary_new', 'diary_updated', 'diary_deleted'].includes(msg.type)) loadDiaries();
+  }, { reconcile: () => loadDiaries() });
 }
 
 (async function init() {

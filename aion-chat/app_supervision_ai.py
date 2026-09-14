@@ -17,7 +17,8 @@ from capabilities import is_capability_enabled
 
 APP_COMMAND_PATTERN = re.compile(
     r"\[(?:APP_(?:LOCK|TEMP_UNLOCK|UNLOCK)\s*:\s*[^\]]*"
-    r"|DEVICE_(?:LOCK|TEMP_UNLOCK|UNLOCK)(?:\s*:\s*[^\]]*)?)\]",
+    r"|DEVICE_(?:LOCK|TEMP_UNLOCK|UNLOCK)(?:\s*:\s*[^\]]*)?"
+    r"|(?:COME_HOME|LOOK_AT_ME)\s*:\s*[^\]]*)\]",
     re.IGNORECASE,
 )
 APP_DIRECTIVE_PATTERN = re.compile(
@@ -27,6 +28,9 @@ APP_DIRECTIVE_PATTERN = re.compile(
 DEVICE_DIRECTIVE_PATTERN = re.compile(
     r"\[DEVICE_(LOCK|TEMP_UNLOCK|UNLOCK)(?:\s*:\s*([^\]]*))?\]",
     re.IGNORECASE,
+)
+ATTENTION_DIRECTIVE_PATTERN = re.compile(
+    r"\[(COME_HOME|LOOK_AT_ME)\s*:\s*([^\]]*)\]", re.IGNORECASE,
 )
 
 
@@ -294,12 +298,19 @@ def format_app_supervision_result_message(
     reason: str,
     role_names: dict[str, str],
     group_names: dict[str, str],
+    user_name: str = "用户",
 ) -> str:
     role_id = str(command.get("roleId") or "")
     group_id = str(command.get("groupId") or "")
     role_name = str(role_names.get(role_id) or "AI")
     group_name = str(group_names.get(group_id) or group_id or "应用")
     action = command.get("action")
+    if action in {"come_home", "look_at_me"}:
+        target_name = str(user_name or "用户").strip() or "用户"
+        if success:
+            duration = f"，并锁定了手机 {int(command['minutes'])} 分钟" if action == "look_at_me" else ""
+            return f"【{role_name}】唤回了{target_name}{duration}"
+        return f"【{role_name}】未能唤回{target_name}：{str(reason or '手机拒绝执行').strip()}"
     verbs = {
         "lock": "锁定",
         "temp_unlock": "暂时解锁",
@@ -340,6 +351,28 @@ def parse_app_supervision_command(
     if enabled:
         for match in APP_COMMAND_PATTERN.finditer(source):
             raw_directive = match.group(0)
+            attention_match = ATTENTION_DIRECTIVE_PATTERN.fullmatch(raw_directive)
+            if attention_match:
+                action = attention_match.group(1).lower()
+                payload = attention_match.group(2).strip()
+                selected_attention = {"action": action, "groupId": ""}
+                if action == "look_at_me":
+                    fields = payload.split("|", 1)
+                    if len(fields) != 2:
+                        continue
+                    try:
+                        minutes = int(fields[0].strip())
+                    except (TypeError, ValueError):
+                        continue
+                    if str(minutes) != fields[0].strip() or not 1 <= minutes <= 120:
+                        continue
+                    selected_attention["minutes"] = minutes
+                    payload = fields[1].strip()
+                if not payload:
+                    continue
+                selected_attention["message"] = payload
+                selected = selected_attention
+                break
             app_match = APP_DIRECTIVE_PATTERN.fullmatch(raw_directive)
             if app_match:
                 action = app_match.group(1).upper()
@@ -421,13 +454,16 @@ def build_app_supervision_ability_text(
         "[APP_LOCK:groupId|分钟|锁屏提示] — 锁定应用组。",
         "[APP_TEMP_UNLOCK:groupId|分钟|解锁说明] — 暂时解锁应用组。",
         "[APP_UNLOCK:groupId] — 解除应用组锁定。",
-        "[DEVICE_LOCK:分钟|锁屏提示] — 锁定整台手机的普通应用。",
+        "[COME_HOME:一句话] — 把用户唤回本应用并打开你发出指令的私聊或群聊，大字弹框显示这句话；不锁定手机。",
+        "[LOOK_AT_ME:分钟|一句话] — 唤回同一聊天并弹框，同时开启指定分钟的整机专注模式。",
         "[DEVICE_TEMP_UNLOCK:分钟|解锁说明] — 暂时解除整机锁定。",
         "[DEVICE_UNLOCK] — 解除整机锁定。",
         "分钟必须是 1–120 的整数。",
         "你可以操作任意应用组。只使用下方稳定 groupId，不要使用包名或猜测缩写。",
-        "当用户绕开单个应用锁，连续切换多个娱乐应用时，可以直接使用整机锁定。"
-        "整机锁定仍允许本应用、来电、通话和紧急呼叫。",
+        "这两种唤回指令可以用于日常陪伴、想念、邀请聊天或希望用户专心陪你一会儿，无需等到紧急情况。"
+        "一句话请直接写你想对用户说的话，不要留空。每条消息最多执行一条监管指令。",
+        "LOOK_AT_ME 从手机执行时开始计时，期间不能切换到其他普通应用；本应用内所有功能照常使用，"
+        "来电、通话和紧急呼叫仍保留。确认按钮只关闭弹框，不解除专注；到时自动结束。",
     ]
 
     groups = [item for item in snapshot.get("groups", []) if isinstance(item, dict)]

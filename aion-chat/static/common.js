@@ -253,10 +253,11 @@ async function reconcileCommonSync(extraHandler) {
   return _commonSyncPromise;
 }
 
-function connectCommonWS(extraHandler) {
+function connectCommonWS(extraHandler, options = {}) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   _commonWs = new WebSocket(`${proto}//${location.host}/ws`);
-  _commonWs.onopen = () => reconcileCommonSync(extraHandler);
+  const reconcile = () => options.reconcile ? options.reconcile() : reconcileCommonSync(extraHandler);
+  _commonWs.onopen = reconcile;
   _commonWs.onmessage = e => {
     const msg = JSON.parse(e.data);
     _commonRememberSyncSeq(msg);
@@ -290,13 +291,16 @@ function connectCommonWS(extraHandler) {
     // 页面自定义处理
     if (extraHandler) extraHandler(msg);
   };
-  _commonWs.onclose = () => setTimeout(() => connectCommonWS(extraHandler), 2000);
+  _commonWs.onclose = () => setTimeout(() => connectCommonWS(extraHandler, options), 2000);
   _commonWs.onerror = () => _commonWs.close();
 
   if (!connectCommonWS._visibilityBound) {
     connectCommonWS._visibilityBound = true;
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') reconcileCommonSync(extraHandler);
+      if (document.visibilityState === 'visible') reconcile();
+    });
+    window.addEventListener('pageshow', event => {
+      if (event.persisted) reconcile();
     });
   }
 }

@@ -237,13 +237,14 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
   .message-nav { right:6px; }
 }
 </style>
+<link rel="stylesheet" href="/static/theater-studio.css?v=20260913-outline-layout">
 </head>
-<body class="theater-page" data-theme="dark">
+<body class="theater-page studio-shell" data-theme="dark">
 <div class="app">
   <!-- 侧栏 -->
   <div class="sidebar" id="sidebar">
     <div class="sidebar-header">
-      <button class="home-btn" onclick="location.href='/'">🏠</button>
+      <button class="home-btn" onclick="location.href='/'" aria-label="返回主界面" title="返回主界面">🏠</button>
       <button onclick="newConversation()">＋ 新剧场</button>
     </div>
     <div class="conv-list" id="convList"></div>
@@ -283,8 +284,9 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
               <span class="toggle-slider"></span>
             </label>
           </div>
-          <label>音色</label>
+          <label>线路 / 音色</label>
           <select id="ttsVoiceSelect" onchange="changeTTSVoice()"></select>
+          <a href="/tts-test" style="display:inline-block;margin-top:10px;color:var(--accent)">试听并挑选免费音色 →</a>
         </div>
 
         <!-- 角色管理 -->
@@ -344,6 +346,7 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 
 <script src="/static/theme.js?v=theme-20260905-theater-v2"></script>
 <script src="/static/theater_tts_queue.js?v=theater-tts-20260713"></script>
+<script src="/static/tts-voices.js?v=favorites-20260912"></script>
 <script>
 /* ══════════════════════════════════════════════════
    小剧场 — 独立聊天功能，不涉及记忆库
@@ -457,23 +460,9 @@ async function loadTTSVoices() {
   try {
     const res = await api('GET', '/api/tts/voices');
     const sel = $('ttsVoiceSelect');
-    sel.innerHTML = '';
     const voices = res.voices || (Array.isArray(res) ? res : []);
-    if (voices.length) {
-      voices.forEach(v => {
-        const opt = document.createElement('option');
-        opt.value = v.uri || v.customized_model_id || v.name || '';
-        opt.textContent = v.customName || v.uri || v.name || '未知';
-        sel.appendChild(opt);
-      });
-    } else {
-      sel.innerHTML = '<option value="">无可用音色</option>';
-    }
-    if (ttsVoice && [...sel.options].some(o => o.value === ttsVoice)) {
-      sel.value = ttsVoice;
-    } else if (sel.options.length && sel.options[0].value) {
-      ttsVoice = sel.options[0].value;
-    }
+    ttsVoice = TTSVoices.populate(sel, voices, ttsVoice);
+    sel.title = res.error || '';
     localStorage.setItem('theater_tts_voice', ttsVoice);
   } catch(e) {}
 }
@@ -529,10 +518,14 @@ document.addEventListener('keydown', bumpTTSPlaybackState);
 let _ws = null;
 let _wsReconnectTimer = null;
 function connectWS() {
+  clearTimeout(_wsReconnectTimer);
+  _wsReconnectTimer = null;
+  if (_ws && _ws.readyState <= 1) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   _ws = new WebSocket(`${proto}//${location.host}/ws`);
   _ws.onopen = () => {
-    clearInterval(_wsReconnectTimer);
+    clearTimeout(_wsReconnectTimer);
+    _wsReconnectTimer = null;
     _ws.send(JSON.stringify({ type: 'register_client', client_id: theaterClientId }));
     sendTTSState();
   };
@@ -540,7 +533,8 @@ function connectWS() {
     try { handleSync(JSON.parse(e.data)); } catch(err) {}
   };
   _ws.onclose = () => {
-    _wsReconnectTimer = setInterval(() => {
+    clearTimeout(_wsReconnectTimer);
+    _wsReconnectTimer = setTimeout(() => {
       if (!_ws || _ws.readyState > 1) connectWS();
     }, 3000);
   };
@@ -625,10 +619,10 @@ function renderConvList() {
   const el = $('convList');
   el.innerHTML = conversations.map(c => `
     <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" onclick="selectConv('${c.id}')">
-      <span class="title">${escHtml(c.title)}</span>
+      <span class="title"><span class="conv-name">${escHtml(c.title)}</span></span>
       <span class="conv-count">${c.message_count || 0}</span>
-      <button class="rename-btn" onclick="event.stopPropagation();renameConv('${c.id}')">✏</button>
-      <button class="del-btn" onclick="event.stopPropagation();delConv('${c.id}')">✕</button>
+      <button class="rename-btn" aria-label="重命名剧场" title="重命名" onclick="event.stopPropagation();renameConv('${c.id}')">✏</button>
+      <button class="del-btn" aria-label="删除剧场" title="删除" onclick="event.stopPropagation();delConv('${c.id}')">✕</button>
     </div>
   `).join('');
 }
@@ -989,7 +983,7 @@ async function send() {
     context_limit: ctx,
     attachments: pendingAttachments.map(a => a.url),
     temperature: temp,
-    tts_enabled: ttsEnabled,
+    tts_enabled: false,
     tts_voice: ttsVoice,
   };
 
@@ -1088,7 +1082,7 @@ async function regenerateMsg(aiMsgId) {
   document.querySelectorAll('.msg-menu.show').forEach(m => m.classList.remove('show'));
   if (!currentConvId || isStreaming) return;
   const requestConvId = currentConvId;
-  const requestTtsEnabled = ttsEnabled;
+  const requestTtsEnabled = false;
   isStreaming = true;
   $('sendBtn').disabled = true;
   const ctx = parseInt($('contextSlider').value) || 20;
@@ -1246,6 +1240,7 @@ async function changeModel() {
 function toggleConfig(e) {
   e.stopPropagation();
   $('configPopup').classList.toggle('show');
+  if ($('configPopup').classList.contains('show')) loadTTSVoices();
 }
 // 阻止配置弹窗内部点击冒泡到 document（防止 select/slider 等操作时弹窗关闭）
 $('configPopup').addEventListener('click', e => e.stopPropagation());
@@ -1880,7 +1875,7 @@ function closeSidebar() {
 }
 
 /* ── 启动 ── */
-init();
 </script>
+<script src="/static/theater-studio.js?v=20260913-outline-layout"></script>
 </body>
 </html>

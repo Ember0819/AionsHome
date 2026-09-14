@@ -46,7 +46,7 @@ _BRACKET_COMMAND_PREFIXES = tuple(value.upper() for value in (
     "[LUCKIN", "[转账", "[悄悄话", "[WECHAT", "[ALARM", "[REMINDER",
     "[MONITOR", "[SCHEDULE_DEL", "[SCHEDULE_LIST", "[NEXT_CHAT", "[HEART",
     "[视频电话", "[CAM_CHECK", "[微信消息", "[拍拍抱枕", "[剧场属性", "[剧场道具",
-    "[DATE_", "[APP_", "[DEVICE_",
+    "[DATE_", "[APP_", "[DEVICE_", "[COME_HOME", "[LOOK_AT_ME", "[PAT:", "[PAT：",
 ))
 _FULLWIDTH_COMMAND_PREFIXES = ("【小组件", "【横幅")
 _ANGLE_COMMAND_PREFIXES = ("<META", "<AUTONOMY_STATE")
@@ -56,7 +56,7 @@ _LONG_FORM_BRACKET_PREFIXES = (
     "[MEMORY", "[许愿", "[SELFIE", "[DRAW", "[POI_SEARCH", "[BAND_NOTE",
     "[LUCKIN", "[悄悄话", "[WECHAT", "[ALARM", "[REMINDER", "[MONITOR",
     "[HEART", "[微信消息", "[拍拍抱枕", "[HOME", "[APP_", "[DEVICE_",
-    "[DATE_",
+    "[DATE_", "[COME_HOME", "[LOOK_AT_ME",
 )
 
 

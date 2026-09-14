@@ -2,6 +2,8 @@
 AI 日记：保存总结后的私密日记，并按模型决定可选发布朋友圈。
 """
 
+from generation_control import spawn_generation_task
+
 import asyncio
 import json
 import time
@@ -217,5 +219,5 @@ async def publish_ai_moment(
     await manager.broadcast({"type": "moment_new", "data": moment_data})
     if expect_reply:
         from routes.moments import _trigger_ai_replies
-        asyncio.create_task(_trigger_ai_replies(moment_id, exclude_author=author))
+        spawn_generation_task(_trigger_ai_replies(moment_id, exclude_author=author))
     return moment_data

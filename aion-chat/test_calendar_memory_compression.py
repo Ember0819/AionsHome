@@ -83,6 +83,73 @@ class CalendarCompressionCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before, "2026-07-08")
         self.assertEqual(after, "2026-07-09")
 
+    async def test_history_keeps_old_counts_filters_store_and_pages_successful_batches(self):
+        import memory_compression
+
+        with patch.object(memory_compression, "get_db", self._connect):
+            await memory_compression.ensure_calendar_compression_schema()
+            async with self._connect() as db:
+                for batch_id, target, status, completed in (
+                    ("old", "main", "completed", 1), ("new", "main", "completed", 2),
+                    ("pending", "main", "applying", 3), ("other", "chatroom", "completed", 4),
+                ):
+                    await db.execute(
+                        "INSERT INTO memory_compression_batches "
+                        "(id,target,level,model_key,status,period_start_ts,period_end_ts,input_count,output_count,created_at,completed_at) "
+                        "VALUES (?,?,'daily','model',?,?,?,20,5,0,?)",
+                        (batch_id, target, status, local_ts("2026-08-29 05:00"), local_ts("2026-09-01 05:00"), completed),
+                    )
+                await db.commit()
+            first = await memory_compression.list_compression_history("main", limit=1)
+            older = await memory_compression.list_compression_history("main", limit=1, offset=1)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["items"][0]["id"], "new")
+        self.assertEqual(first["items"][0]["period_label"], "2026-08-29～2026-08-31")
+        self.assertEqual(first["items"][0]["delta"], -15)
+        self.assertEqual(first["items"][0]["reduction_percent"], 75)
+        self.assertIsNone(first["items"][0]["durable_output_count"])
+        self.assertEqual(older["items"][0]["id"], "old")
+        self.assertFalse(older["has_more"])
+
+    async def test_chatroom_compression_uses_its_own_persona_and_leaves_event_without_reflection(self):
+        import chatroom
+        import memory_compression
+
+        async with self._connect() as db:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN evidence_summary TEXT DEFAULT ''")
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN evidence_detail_level TEXT DEFAULT 'summary'")
+            await db.execute(
+                "INSERT INTO chatroom_memories (id,content,created_at,memory_kind) VALUES ('old','一起做饭',?,'daily')",
+                (local_ts("2026-07-08 10:00"),),
+            )
+            await db.commit()
+        model = AsyncMock(return_value={
+            "periods": [{"period": "2026-07-08", "memories": [{"content": "一起做饭"}]}]
+        })
+        with patch.object(memory_compression, "get_db", self._connect), patch.object(
+            memory_compression, "MODELS", {"cheap": {"provider": "test"}}
+        ), patch.object(memory_compression, "_call_compression_model", model), patch.object(
+            memory_compression, "_embedding_for_content", AsyncMock(return_value=None)
+        ), patch.object(memory_compression, "load_worldbook", return_value={
+            "user_name": "小雨", "ai_persona": "不该带入的主角色设定"
+        }), patch.object(chatroom, "load_chatroom_config", return_value={"connor_name": "远帆"}), patch.object(
+            chatroom, "_read_connor_persona", return_value="稳重，偶尔调侃"
+        ):
+            result = await memory_compression.run_calendar_compression(
+                "chatroom", "daily", "cheap", now_ts=local_ts("2026-07-16 05:00")
+            )
+            events = await memory_compression.list_compression_events(since=0)
+        self.assertTrue(result["ok"])
+        model.assert_awaited_once()
+        prompt = model.await_args.args[1]
+        self.assertIn("远帆", prompt)
+        self.assertIn("稳重，偶尔调侃", prompt)
+        self.assertNotIn("不该带入的主角色设定", prompt)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["author"], "connor")
+        self.assertEqual(events[0]["reflection"], "")
+        self.assertIn("远帆", events[0]["title"])
+
     async def test_daily_preview_only_counts_active_stage_zero_days_older_than_seven_days(self):
         import memory_compression
 
@@ -101,23 +168,29 @@ class CalendarCompressionCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview["periods"][0]["label"], "2026-07-08")
         self.assertEqual(preview["periods"][0]["memory_count"], 2)
 
-    async def test_weekly_preview_waits_until_the_whole_week_is_seven_days_old(self):
+    async def test_weekly_preview_waits_until_the_whole_week_is_ninety_days_old(self):
         import memory_compression
 
-        now = local_ts("2026-07-16 12:00")  # Thursday
-        await self._insert_main("last-week", local_ts("2026-07-08 10:00"), stage=1, period_kind="day")
-        await self._insert_main("this-week", local_ts("2026-07-14 10:00"), stage=1, period_kind="day")
+        # July 6-12 ends July 13 at 05:00; it reaches 90 days on October 11.
+        await self._insert_main("eligible-week", local_ts("2026-07-08 10:00"), stage=1, period_kind="day")
+        await self._insert_main("newer-week", local_ts("2026-07-14 10:00"), stage=1, period_kind="day")
 
         with patch.object(memory_compression, "get_db", self._connect):
-            preview = await memory_compression.compression_preview("main", "weekly", now_ts=now)
+            before = await memory_compression.compression_preview(
+                "main", "weekly", now_ts=local_ts("2026-10-11 04:59")
+            )
+            ready = await memory_compression.compression_preview(
+                "main", "weekly", now_ts=local_ts("2026-10-11 05:00")
+            )
 
-        self.assertEqual(preview["memory_count"], 0)
-        self.assertEqual(preview["period_count"], 0)
+        self.assertEqual(before["memory_count"], 0)
+        self.assertEqual(ready["memory_count"], 1)
+        self.assertEqual(ready["periods"][0]["label"], "2026-07-06 ~ 2026-07-12")
 
     async def test_weekly_preview_requires_no_uncompressed_daily_rows_in_the_week(self):
         import memory_compression
 
-        now = local_ts("2026-07-20 05:00")
+        now = local_ts("2026-10-11 05:00")
         await self._insert_main("compressed-day", local_ts("2026-07-08 10:00"), stage=1, period_kind="day")
         await self._insert_main("raw-day", local_ts("2026-07-09 10:00"), stage=0)
 
@@ -140,26 +213,31 @@ class CalendarCompressionCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview["period_count"], 1)
         self.assertEqual(preview["periods"][0]["label"], "2026-07-06 ~ 2026-07-12")
 
-    async def test_monthly_preview_excludes_current_month_and_uses_stage_two_week_capsules(self):
+    async def test_monthly_preview_waits_until_the_whole_month_is_365_days_old(self):
         import memory_compression
 
-        now = local_ts("2026-07-16 12:00")
-        await self._insert_main("june-week", local_ts("2026-06-18 10:00"), stage=2, period_kind="week")
+        # June 2025 ends July 1 at 05:00; its age is measured from that boundary.
+        await self._insert_main("june-week", local_ts("2025-06-18 10:00"), stage=2, period_kind="week")
         await self._insert_main("july-week", local_ts("2026-07-09 10:00"), stage=2, period_kind="week")
 
         with patch.object(memory_compression, "get_db", self._connect):
-            preview = await memory_compression.compression_preview("main", "monthly", now_ts=now)
+            before = await memory_compression.compression_preview(
+                "main", "monthly", now_ts=local_ts("2026-07-01 04:59")
+            )
+            ready = await memory_compression.compression_preview(
+                "main", "monthly", now_ts=local_ts("2026-07-01 05:00")
+            )
 
-        self.assertEqual(preview["memory_count"], 1)
-        self.assertEqual(preview["period_count"], 1)
-        self.assertEqual(preview["periods"][0]["label"], "2026-06")
+        self.assertEqual(before["memory_count"], 0)
+        self.assertEqual(ready["memory_count"], 1)
+        self.assertEqual(ready["periods"][0]["label"], "2025-06")
 
     async def test_monthly_preview_waits_until_no_daily_capsules_remain(self):
         import memory_compression
 
         now = local_ts("2026-07-16 12:00")
-        await self._insert_main("june-week", local_ts("2026-06-18 10:00"), stage=2, period_kind="week")
-        await self._insert_main("june-day", local_ts("2026-06-20 10:00"), stage=1, period_kind="day")
+        await self._insert_main("june-week", local_ts("2025-06-18 10:00"), stage=2, period_kind="week")
+        await self._insert_main("june-day", local_ts("2025-06-20 10:00"), stage=1, period_kind="day")
 
         with patch.object(memory_compression, "get_db", self._connect):
             preview = await memory_compression.compression_preview("main", "monthly", now_ts=now)
@@ -283,6 +361,66 @@ class CalendarCompressionRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "no_candidates")
         model_call.assert_not_awaited()
 
+    async def test_invalid_reflection_and_failed_refresh_do_not_fail_compression(self):
+        import memory_compression
+        from ws import manager
+
+        for index, reflection in enumerate((None, {"bad": "shape"}, ["wrong"], 42)):
+            with self.subTest(reflection=reflection):
+                await self._insert(f"input-{index}", local_ts("2026-07-08 10:00"))
+                model = AsyncMock(return_value={
+                    "periods": [{"period": "2026-07-08", "memories": [{"content": "保留的重要经历"}]}],
+                    "reflection": reflection,
+                })
+                with patch.object(memory_compression, "get_db", self._connect), patch.object(
+                    memory_compression, "MODELS", {"cheap": {"provider": "test"}}
+                ), patch.object(memory_compression, "_call_compression_model", model), patch.object(
+                    memory_compression, "_embedding_for_content", AsyncMock(return_value=None)
+                ), patch.object(manager, "broadcast", AsyncMock(side_effect=RuntimeError("offline"))):
+                    result = await memory_compression.run_calendar_compression(
+                        "main", "daily", "cheap", now_ts=local_ts("2026-07-16 05:00")
+                    )
+                    events = await memory_compression.list_compression_events(since=0)
+                self.assertTrue(result["ok"])
+                model.assert_awaited_once()
+                self.assertEqual(len(events), index + 1)
+                self.assertEqual(events[0]["reflection"], "")
+                self.assertIn("2026-07-08", events[0]["title"])
+                self.assertTrue(events[0]["detail"])
+
+    async def test_concurrent_runs_recheck_candidates_before_calling_model(self):
+        import asyncio
+        import memory_compression
+
+        await self._insert("shared-input", local_ts("2026-07-08 10:00"))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def generate(*args):
+            entered.set()
+            await release.wait()
+            return {"periods": [{"period": "2026-07-08", "memories": [{"content": "保留的经历"}]}]}
+
+        model_call = AsyncMock(side_effect=generate)
+        with patch.object(memory_compression, "get_db", self._connect), patch.object(
+            memory_compression, "_RUN_LOCKS", {}
+        ), patch.object(memory_compression, "MODELS", {"cheap": {"provider": "test"}}), patch.object(
+            memory_compression, "_call_compression_model", model_call
+        ), patch.object(memory_compression, "_embedding_for_content", AsyncMock(return_value=None)):
+            first = asyncio.create_task(memory_compression.run_calendar_compression(
+                "main", "daily", "cheap", now_ts=local_ts("2026-07-16 05:00")
+            ))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            second = asyncio.create_task(memory_compression.run_calendar_compression(
+                "main", "daily", "cheap", now_ts=local_ts("2026-07-16 05:00")
+            ))
+            await asyncio.sleep(0)
+            release.set()
+            first_result, second_result = await asyncio.gather(first, second)
+        self.assertTrue(first_result["ok"])
+        self.assertEqual(second_result["reason"], "no_candidates")
+        model_call.assert_awaited_once()
+
     async def test_background_job_persists_progress_and_blocks_duplicate_start(self):
         import memory_compression
 
@@ -398,6 +536,79 @@ class CalendarCompressionRunTests(unittest.IsolatedAsyncioTestCase):
             source_ids = await memory_compression.resolve_source_message_ids("main", output["id"])
         self.assertEqual(source_ids, ["private:old-1", "private:old-2"])
 
+    async def test_reflection_uses_same_call_and_event_is_not_duplicated(self):
+        import memory_compression
+
+        await self._insert("reflect-input", local_ts("2026-07-08 10:00"))
+        await self._insert("reflect-input-2", local_ts("2026-07-08 11:00"))
+        reflection = "那天的努力，我记住了。"
+        model = AsyncMock(return_value={
+            "periods": [{"period": "2026-07-08", "memories": [{"content": "完成一个项目"}]}],
+            "durable_facts": [{"content": "喜欢一起做项目"}],
+            "reflection": reflection,
+        })
+        with patch.object(memory_compression, "get_db", self._connect), patch.object(
+            memory_compression, "MODELS", {"cheap": {"provider": "test"}}
+        ), patch.object(memory_compression, "_call_compression_model", model), patch.object(
+            memory_compression, "_embedding_for_content", AsyncMock(return_value=None)
+        ), patch.object(memory_compression, "load_worldbook", return_value={
+            "ai_name": "星舟", "user_name": "小雨", "ai_persona": "沉静温柔，喜欢园艺"
+        }):
+            result = await memory_compression.run_calendar_compression(
+                "main", "daily", "cheap", now_ts=local_ts("2026-07-16 05:00")
+            )
+            first = await memory_compression.list_compression_events(since=0)
+            again = await memory_compression.list_compression_events(since=0)
+            history = await memory_compression.list_compression_history("main")
+        self.assertTrue(result["ok"])
+        model.assert_awaited_once()
+        prompt = model.await_args.args[1]
+        for value in ("星舟", "小雨", "沉静温柔，喜欢园艺"):
+            self.assertIn(value, prompt)
+        self.assertEqual(first, again)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["reflection"], reflection)
+        self.assertEqual(first[0]["author"], "aion")
+        self.assertIn("星舟", first[0]["title"])
+        record = history["items"][0]
+        self.assertEqual((record["input_count"], record["output_count"]), (2, 2))
+        self.assertEqual((record["memory_output_count"], record["durable_output_count"]), (1, 1))
+        self.assertEqual(record["delta"], 0)
+        async with self._connect() as db:
+            rows = await (await db.execute("SELECT content FROM memories")).fetchall()
+        self.assertNotIn(reflection, [row[0] for row in rows])
+
+    async def test_expanded_output_keeps_inputs_active_without_extra_calls_or_events(self):
+        import memory_compression
+
+        await self._insert("keep-original", local_ts("2026-07-08 10:00"))
+        for response in (
+            {"memories": [{"content": "经历"}], "durable_facts": [{"content": "承诺"}]},
+            {"memories": [{"content": "很冗长的情感扩写" * 20}]},
+        ):
+            with self.subTest(response=response):
+                model = AsyncMock(return_value={
+                    "periods": [{"period": "2026-07-08", "memories": response["memories"]}],
+                    "durable_facts": response.get("durable_facts", []),
+                })
+                embedding = AsyncMock()
+                with patch.object(memory_compression, "get_db", self._connect), patch.object(
+                    memory_compression, "MODELS", {"cheap": {"provider": "test"}}
+                ), patch.object(memory_compression, "_call_compression_model", model), patch.object(
+                    memory_compression, "_embedding_for_content", embedding
+                ):
+                    result = await memory_compression.run_calendar_compression(
+                        "main", "daily", "cheap", now_ts=local_ts("2026-07-16 05:00")
+                    )
+                    self.assertEqual(await memory_compression.list_compression_events(since=0), [])
+                self.assertEqual(result["reason"], "compression_expanded")
+                self.assertFalse(result["ok"])
+                model.assert_awaited_once()
+                embedding.assert_not_awaited()
+                async with self._connect() as db:
+                    rows = await (await db.execute("SELECT id, archive_state FROM memories")).fetchall()
+                self.assertEqual(rows, [("keep-original", "active")])
+
     async def test_missing_period_in_model_output_keeps_every_input_active(self):
         import memory_compression
 
@@ -427,6 +638,36 @@ class CalendarCompressionRunTests(unittest.IsolatedAsyncioTestCase):
                 await db.execute("SELECT archive_state FROM memories ORDER BY id")
             ).fetchall()
         self.assertEqual([row[0] for row in states], ["active", "active"])
+        with patch.object(memory_compression, "get_db", self._connect):
+            self.assertEqual(await memory_compression.list_compression_events(since=0), [])
+
+
+class CompressionPromptTests(unittest.TestCase):
+    def test_levels_include_task_source_dates_and_budget_without_private_ids(self):
+        import memory_compression
+
+        rows = {"private-row": {"content": "一起做饭，虽然烧糊了却笑得很开心。", "source_start_ts": local_ts("2025-06-18 12:00")}}
+        for level, label, start, end, task, source_period in (
+            ("daily", "2025-06-18", "2025-06-18", "2025-06-19", "日记忆压缩", "2025-06-18"),
+            ("weekly", "2025-06-16 ~ 2025-06-22", "2025-06-16", "2025-06-23", "周记忆压缩", "2025-06-18"),
+            ("monthly", "2025-06", "2025-06-01", "2025-07-01", "月记忆压缩", "2025-06-16 ~ 2025-06-22"),
+        ):
+            with self.subTest(level=level):
+                periods = [{"label": label, "period_start_ts": local_ts(start + " 05:00"),
+                            "period_end_ts": local_ts(end + " 05:00"), "memory_ids": ["private-row"]}]
+                prompt = memory_compression._period_prompt(level, periods, rows, {"name": "星舟", "persona": "喜欢调侃"})
+                payload = json.loads(prompt.rsplit("输入：", 1)[1])[0]
+                self.assertIn(task, prompt)
+                self.assertIn("喜欢调侃", prompt)
+                self.assertNotIn("private-row", prompt)
+                self.assertEqual(payload["period"], label)
+                self.assertEqual(payload["start"], start + "T05:00")
+                self.assertEqual(payload["end_exclusive"], end + "T05:00")
+                self.assertEqual(payload["max_memories"], 1)
+                self.assertEqual(payload["memories"][0]["source_period"], source_period)
+                self.assertEqual(payload["memories"][0]["content"], rows["private-row"]["content"])
+                self.assertEqual(memory_compression._compression_budget(periods, rows),
+                                 {"max_output_count": 1, "max_content_chars": len(rows["private-row"]["content"])})
 
 
 class ColdArchiveRecallSafetyTests(unittest.TestCase):

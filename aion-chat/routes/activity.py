@@ -24,6 +24,7 @@ from config import load_worldbook
 from chatroom import load_chatroom_config
 from location import load_location_status
 from autonomy_state import wake_summary_timeline_title
+from memory_compression import list_compression_events
 from family_events import (
     build_user_timeline_items,
     list_grouped_user_events,
@@ -368,6 +369,7 @@ async def get_timeline(hours: int = 24, limit: int = 300):
 
     user_groups = await list_grouped_user_events(since=cutoff, limit=limit)
     items.extend(build_user_timeline_items(user_groups, user_name))
+    items.extend(await list_compression_events(since=cutoff, limit=limit))
 
     status = load_location_status()
     changed_at = float(status.get("state_changed_at") or 0)

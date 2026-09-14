@@ -1,9 +1,11 @@
 """
 服务端流式 TTS 模块
 - 按句子边界切分 AI 回复文本
-- 异步并行调用硅基流动 TTS 合成
+- 异步并行调用所选线路（硅基流动 / Edge 免费）合成
 - 通过 WebSocket 推送音频 URL 给前端顺序播放
 """
+
+from generation_control import current_generation, spawn_generation_task
 
 import re, asyncio, logging, time
 from collections import deque
@@ -14,6 +16,28 @@ from config import get_key, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES
 from link_preview import strip_urls_for_message
 
 log = logging.getLogger("tts")
+
+# Chinese voices verified against Edge's voice list. Keeping this small catalog
+# local lets the free route remain selectable when another provider is offline.
+EDGE_VOICES = [
+    {"uri": f"edge:{voice}", "customName": f"Edge 免费 · {name}", "provider": "edge"}
+    for voice, name in (
+        ("zh-CN-XiaoxiaoNeural", "晓晓 · 女声"),
+        ("zh-CN-YunxiNeural", "云希 · 男声"),
+        ("zh-CN-XiaoyiNeural", "晓伊 · 女声"),
+        ("zh-CN-YunjianNeural", "云健 · 男声"),
+        ("zh-CN-YunyangNeural", "云扬 · 男声"),
+        ("zh-CN-YunxiaNeural", "云夏 · 男声"),
+        ("zh-CN-liaoning-XiaobeiNeural", "晓北 · 东北话女声"),
+        ("zh-CN-shaanxi-XiaoniNeural", "晓妮 · 陕西话女声"),
+        ("zh-HK-HiuGaaiNeural", "晓佳 · 粤语女声"),
+        ("zh-HK-HiuMaanNeural", "晓曼 · 粤语女声"),
+        ("zh-HK-WanLungNeural", "云龙 · 粤语男声"),
+        ("zh-TW-HsiaoChenNeural", "晓臻 · 台湾女声"),
+        ("zh-TW-HsiaoYuNeural", "晓雨 · 台湾女声"),
+        ("zh-TW-YunJheNeural", "云哲 · 台湾男声"),
+    )
+]
 
 
 def _log_background_tts_failure(task: asyncio.Task):
@@ -70,6 +94,7 @@ _STRIP_PATTERNS = [
     re.compile(r'\[MEMORY:[^\]]*\]'),
     re.compile(r'\[微信消息[：:][^\]]*\]'),
     re.compile(r'\[拍拍抱枕:(?:拍打开关|拍拍调慢|拍拍调快)\]'),
+    re.compile(r'\[PAT\s*[：:][^\]]*\]', re.IGNORECASE),
     re.compile(r'[\[【]心里嘀咕\s*[：:]\s*[^\]】]*[\]】]'),
     re.compile(r'\[查看动态:\d+\]'),
     re.compile(r'\[SELFIE:[^\]]*\]'),
@@ -89,10 +114,24 @@ _COMMA_CHARS = set('，,、；;：:')
 _SENTENCE_ENDS |= set('.!?')
 _COMMA_CHARS |= set(',;:')
 
+# Match formatting separately from content: keep hyphens/minus signs and
+# underscores inside names such as PATCH_01. Reuse these spans when splitting
+# so a long divider or a numbered-list prefix cannot be cut into spoken pieces.
+_MARKDOWN_MARKUP_RE = re.compile(
+    r'^[ \t]*(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|={2,}[ \t]*)\r?$'
+    r'|^[ \t]*(?:`{3,}|~{3,})[^\r\n]*'
+    r'|^[ \t]*(?:>[ \t]*|#{1,6}(?:[ \t]+|$)|(?:[-+*]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]*)?)+'
+    r'|\*+|`+|~{2,}|(?<!\w)_+|_+(?!\w)',
+    re.MULTILINE,
+)
+_MARKDOWN_PENDING_PREFIX_RE = re.compile(r'[ \t]*(?:[-+*>#`~_]+|\d{1,9}[.)]?)[ \t]*')
+
+
 def _strip_tags(text: str) -> str:
-    """去除所有特殊标签，只保留纯文本"""
+    """去除特殊标签、Markdown 排版和网址，保留可朗读正文。"""
     for p in _STRIP_PATTERNS:
         text = p.sub('', text)
+    text = _MARKDOWN_MARKUP_RE.sub('', text)
     return strip_urls_for_message(text)
 
 
@@ -118,9 +157,19 @@ def _find_cut_position_for_text(buffer: str, min_chars: int, max_chars: int) -> 
     in_bracket = False
     in_meta = False
     best_comma_cut = None
+    markdown_ends = {match.start(): match.end() for match in _MARKDOWN_MARKUP_RE.finditer(buffer)}
+    last_line_start = buffer.rfind('\n') + 1
+    pending_prefix = _MARKDOWN_PENDING_PREFIX_RE.fullmatch(buffer[last_line_start:])
 
     i = 0
     while i < len(buffer):
+        # A streamed "1." may still become "1. item"; wait for its content
+        # instead of mistaking the list marker for the end of a sentence.
+        if pending_prefix and i >= last_line_start:
+            return None
+        if i in markdown_ends and not in_bracket and not in_meta:
+            i = markdown_ends[i]
+            continue
         ch = buffer[i]
 
         if ch == '[' and not in_meta:
@@ -191,6 +240,9 @@ def split_text_for_tts(text: str, *, min_chars: int = 300, max_chars: int = 500)
 
 
 async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -> bytes | None:
+    if voice.startswith("edge:"):
+        return await _request_edge_tts_audio(text, voice[5:])
+
     key = get_key("siliconflow")
     if not key:
         log.warning("TTS: 无硅基流动 API Key，跳过合成 seq=%s", seq)
@@ -216,6 +268,23 @@ async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -
         log.warning("TTS API 错误: status=%d seq=%s attempt=%d", resp.status_code, seq, attempt + 1)
         await asyncio.sleep(0.5 * (attempt + 1))
     return None
+
+
+async def _request_edge_tts_audio(text: str, voice: str) -> bytes:
+    """Return MP3 bytes to the existing cache/queue pipeline; never use a paid fallback."""
+    import edge_tts
+
+    if not re.fullmatch(r"[a-z]{2}-[A-Za-z0-9-]+Neural", voice):
+        raise ValueError("Edge 音色名称无效")
+    audio = bytearray()
+    async with asyncio.timeout(45):
+        communicate = edge_tts.Communicate(text=text, voice=voice, connect_timeout=10, receive_timeout=30)
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio.extend(chunk["data"])
+    if not audio:
+        raise RuntimeError("Edge 未返回音频，请稍后重试")
+    return bytes(audio)
 
 
 async def synthesize_text_to_mp3(
@@ -294,7 +363,7 @@ def synthesize_message_tts_later(msg_id: str, text: str, voice: str, ws_manager=
     text = (text or "").strip()
     if not msg_id or not text or not voice:
         return None
-    task = asyncio.create_task(synthesize_message_tts(msg_id, text, voice, ws_manager))
+    task = spawn_generation_task(synthesize_message_tts(msg_id, text, voice, ws_manager))
     task.add_done_callback(_log_background_tts_failure)
     return task
 
@@ -352,6 +421,10 @@ class TTSStreamer:
         self._event_data = dict(event_data or {})
         self._cancelled = False
         self._emitted_audio_segments = 0
+        scope = current_generation()
+        if scope:
+            scope.message_ids.add(msg_id)
+            scope.on_cancel.append(self.cancel)
 
     @property
     def worker_task_count(self) -> int:
@@ -457,7 +530,11 @@ class TTSStreamer:
             return
         if self._ws:
             if payload.get("type") in {"tts_chunk", "tts_done", "tts_merged"} and hasattr(self._ws, "send_tts_event"):
-                await self._ws.send_tts_event(payload)
+                routed_payload = await self._ws.send_tts_event(payload)
+                if isinstance(routed_payload, dict):
+                    # SSE and WS must name the same device; otherwise the HTTP
+                    # sender also plays an unaddressed copy of every segment.
+                    payload = routed_payload
             else:
                 await self._ws.broadcast(payload)
         if self._sse_queue:
@@ -558,7 +635,7 @@ class TTSStreamer:
             return
         self._queue = asyncio.Queue(maxsize=self._max_pending_segments)
         self._workers = [
-            asyncio.create_task(self._worker())
+            spawn_generation_task(self._worker())
             for _ in range(self._max_concurrency)
         ]
 
@@ -629,7 +706,7 @@ class TTSStreamer:
         })
 
         if self._merge_segments:
-            self._merge_task = asyncio.create_task(self._finalize_merged_audio())
+            self._merge_task = spawn_generation_task(self._finalize_merged_audio())
             if wait_for_merge:
                 await self._merge_task
 
@@ -668,7 +745,7 @@ class TTSStreamer:
             return
 
         if self._delete_segments_after_seconds is not None:
-            asyncio.create_task(self._delete_segments_later(paths, self._delete_segments_after_seconds))
+            spawn_generation_task(self._delete_segments_later(paths, self._delete_segments_after_seconds))
 
     @staticmethod
     def _merge_mp3_files(paths: list[Path], merged_path: Path):
@@ -687,7 +764,7 @@ class TTSStreamer:
                 log.warning("TTS delayed segment cleanup failed for %s: %s", path, e)
 
     async def _synthesize(self, text: str, seq: int, safe_id: str):
-        """调用硅基流动 TTS 合成 → 保存文件 → WS 推送"""
+        """调用所选 TTS 线路合成 → 保存文件 → WS 推送"""
         chunk_name = f"{safe_id}_s{seq}"
         try:
             if self._cancelled:

@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from wechat_bridge import create_wechat_binding
-from wechat_mode import set_wechat_mode
+from wechat_mode import find_wechat_mode_for_sender, set_wechat_mode
 from wechat_mode_dispatcher import WeChatModeDispatcher
 from ws import ConnectionManager
 
@@ -88,6 +88,36 @@ async def private_identity(_source_type, _source_id, _sender):
 
 
 class WeChatModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rebinding_group_moves_mirroring_and_keeps_private_delivery(self):
+        settings = enabled_group_bound_mode_settings()
+        create_wechat_binding(
+            source_type="chatroom", source_id="room-new",
+            account_id="bot-1", wechat_user_id="peer-1",
+            context_token="new-context", settings=settings, now=200,
+        )
+        sent = []
+        dispatcher = WeChatModeDispatcher(
+            settings=settings,
+            send_text=lambda **kwargs: sent.append(kwargs),
+            identity_resolver=private_identity,
+        )
+        for room_id in ("room-1", "room-new"):
+            for sender in ("aion", "connor"):
+                await dispatcher.process_event({
+                    "type": "chatroom_msg_created",
+                    "data": {"id": f"{room_id}-{sender}", "room_id": room_id,
+                             "sender": sender, "content": f"{room_id}-{sender}"},
+                })
+        await dispatcher.process_event(assistant_event(content="private"))
+
+        self.assertEqual([item["content"] for item in sent], [
+            "Companion：room-new-aion", "Companion：room-new-connor", "Companion：private",
+        ])
+        self.assertTrue(all(item["context_token"] == "new-context" for item in sent))
+        mode = find_wechat_mode_for_sender(settings, "bot-1", "peer-1")
+        self.assertEqual(mode["inbound_route"]["source_id"], "room-new")
+        self.assertEqual(mode["enabled_at"], 100)
+
     async def test_private_bubbles_send_sequentially(self):
         sent = []
 

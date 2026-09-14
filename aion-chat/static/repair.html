@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>维修室</title>
+  <link rel="icon" href="/public/repair-room-icon.png">
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/repair.css">
+  <script src="/static/theme.js"></script>
+  <script defer src="/static/vendor/markdown-it-15.0.1.min.js"></script>
+  <script defer src="/static/repair-scroll.js"></script>
+  <script defer src="/static/repair.js?v=20260912-active-only"></script>
+</head>
+<body class="repair-room" data-theme="dark">
+<div class="repair-app">
+  <header class="repair-header">
+    <a href="/" class="home-link" aria-label="返回首页">⌂</a>
+    <div class="header-title"><h1 aria-labelledby="taskTitle"><button id="renameTask" class="rename-title" aria-label="修改任务名称" disabled><span id="taskTitle">维修室</span><span class="rename-mark" aria-hidden="true">✎</span></button></h1><p id="participants">一起商量，把小事做好。</p></div>
+    <span id="workModel" class="work-model" hidden></span>
+    <button id="tasksToggle" aria-label="打开任务列表" aria-haspopup="dialog">任务</button>
+  </header>
+  <section id="pairing" class="pairing" hidden>
+    <h2>把这台设备连接到维修室</h2>
+    <p>在电脑本机打开维修室，展开「设备配对」查看配对码。只需连接一次。</p>
+    <form id="pairForm"><label>配对码<input id="pairCode" autocomplete="off" required></label><button class="primary">连接设备</button></form>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <main>
+      <section id="welcome" class="empty-state" hidden><span>🔧</span><h2>今天有什么小事要一起处理？</h2><p>找一份文件、排查一个问题，或给小家做点小修补。<br>每件事都有自己的讨论和工作记录。</p><button id="welcomeNew" class="primary">开始一件小事</button></section>
+      <div id="taskView" hidden>
+        <nav class="view-tabs" aria-label="任务视图">
+          <button data-tab="chat" class="selected" aria-pressed="true">聊天</button><button data-tab="plan" aria-pressed="false">当前约定</button><span id="phase" class="phase"></span>
+        </nav>
+        <div id="activityLine" class="activity-line" hidden><span class="activity-dot" aria-hidden="true"></span><span id="activity" role="status">可以开始讨论</span><time id="activityTime"></time><button id="stop" hidden>停止</button></div>
+        <section id="chatPanel" class="panel chat-panel">
+          <div class="conversation-wrap">
+          <div id="conversation" class="conversation"><div id="messages"></div>
+            <div id="chatApproval" class="chat-followup" hidden><span>这版方案可以开始了，直接回复「就这样改」也可以。</span><button id="chatStart" class="primary">开始</button><button id="chatShowPlan">查看约定</button></div>
+            <div id="chatReview" class="chat-followup" hidden><span>本轮已结束。有调整继续说，确认满意后再验收。</span><button id="chatAccept">验收并回传群聊</button></div>
+          </div>
+          <button id="jumpLatest" class="jump-latest" hidden>↓ 有新内容</button>
+          </div>
+          <div id="pendingFiles" class="pending-files"></div>
+          <div id="uploadStatus" class="upload-status" role="status" hidden></div>
+          <form id="composer" class="composer">
+            <div id="composerTools" class="composer-tools" hidden>
+              <label class="recipient-label">发给 <select id="recipient"><option value="connor" selected>执行者</option><option value="both">大家</option><option value="aion">AI</option></select></label>
+              <div class="tool-actions"><button id="attachFile" type="button">＋ 添加附件</button><input id="upload" type="file" accept="image/png,image/jpeg,image/webp,.txt,.md,.json,.log,.pdf" hidden multiple><button id="inspect" type="button" title="按输入框里的要求处理；没写新内容时，直接接着你上一条消息">继续处理 / 取文件</button></div>
+              <p class="muted">已开放本机完全访问。查找、取文件、新建文档直接说；删除或覆盖重要内容先确认。</p>
+              <p id="composerHint">先聊清楚要怎么改，再说「就这样改」开始。</p>
+            </div>
+            <button id="toolsToggle" class="tools-toggle" type="button" aria-label="更多聊天操作" aria-expanded="false" aria-controls="composerTools">＋</button>
+            <button id="attachImage" class="image-toggle" type="button" aria-label="发送图片或截图" title="发送图片或截图，也可以粘贴截图"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8" cy="8" r="1.5"/><path d="m4 17 5-5 4 4 3-3 5 5"/></svg></button>
+            <input id="imageUpload" type="file" accept="image/png,image/jpeg,image/webp" hidden multiple>
+            <textarea id="draft" rows="1" placeholder="说说需要做什么…" aria-label="消息内容"></textarea>
+            <button id="send" class="primary">发送</button>
+          </form>
+        </section>
+        <section id="planPanel" class="panel plan-panel" hidden>
+          <div class="section-intro"><h3>当前说好的内容</h3><p>在聊天里商量和确认就能开始。这里保留当前方案，也可以手动编辑。</p></div>
+          <button id="generatePlan">根据讨论整理方案</button>
+          <label class="plan-label">当前方案 <span id="revision"></span><textarea id="planText" rows="14" placeholder="目标、具体改动、范围，以及怎么确认做好了。"></textarea></label>
+          <div class="plan-actions"><button id="savePlan">保存方案</button><button id="execute" class="primary">确认此方案并开始</button></div>
+          <div id="acceptBox" class="accept-box" hidden><h3>请你看看结果</h3><p>确认使用没有问题后，成果会回传到最近的群聊。有问题可回到讨论继续处理。</p><button id="accept" class="primary">验收通过，回传群聊</button></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+<dialog id="taskDrawer" class="task-drawer" aria-labelledby="drawerTitle"><aside id="taskSidebar">
+  <div class="drawer-heading"><h2 id="drawerTitle">维修任务</h2><button id="closeTasks" aria-label="关闭任务列表">×</button></div>
+  <button id="newTask" class="primary">＋ 新任务</button>
+  <div id="taskList" class="task-list"></div>
+  <p id="contextHint" class="sidebar-note">工作记录持续保留。</p>
+  <details id="pairDetails" hidden><summary>设备配对</summary><p>仅本机显示，请在你的手机上输入：</p><code id="localCode"></code></details>
+</aside></dialog>
+<dialog id="newDialog"><form id="newForm"><h2>新建维修任务</h2><label>这件事叫什么？<input id="newTitle" maxlength="100" required placeholder="例如：相册按钮点不动"></label><label>补充近期生活背景<select id="contextMinutes"><option value="30">最近 30 分钟</option><option value="120" selected>最近 2 小时</option><option value="360">最近 6 小时</option><option value="1440">最近一天</option><option value="0">本次不补充</option></select></label><p>每位伴侣读取各自的私聊和群聊，最多 30 条；维修对话独立连续保存。</p><div class="dialog-actions"><button id="cancelNew" type="button">取消</button><button class="primary">创建</button></div></form></dialog>
+<div id="notice" role="alert" hidden></div>
+<dialog id="renameDialog" aria-labelledby="renameHeading"><form id="renameForm"><h2 id="renameHeading">修改任务名称</h2><label>任务名称<input id="renameTitle" maxlength="100" required autocomplete="off"></label><p>改名后继续保留这件事的聊天和工作记录。</p><div class="dialog-actions"><button id="cancelRename" type="button">取消</button><button id="saveRename" class="primary">保存</button></div></form></dialog>
+</body>
+</html>

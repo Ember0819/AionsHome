@@ -133,6 +133,15 @@
 .settings-grid.compact {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+.tts-loudness-heading, .tts-loudness-scale {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.tts-loudness-heading output { font-weight: 700; white-space: nowrap; }
+#ttsLoudnessInput { width: 100%; min-height: 44px; margin: 4px 0; accent-color: var(--accent, #ff8359); }
+.tts-loudness-scale { font-size: 12px; opacity: .65; }
 .field {
   min-width: 0;
 }
@@ -549,6 +558,30 @@ body[data-theme="light"] .transport-mode-btn.is-active {
       </div>
     </div>
 
+    <a class="settings-card" href="/tts-test" style="display:block;padding:20px;color:var(--text);text-decoration:none;margin-bottom:16px">
+      <strong>免费语音试听 →</strong>
+      <p class="hint">直接试听文字，把喜欢的声音加入聊天和小剧场候选。</p>
+    </a>
+    <details class="settings-card" id="ttsLoudnessSection" open>
+      <summary>
+        <div class="summary-title">
+          <strong>🔊 手机语音响度</strong>
+          <span>调整聊天语音的增强强度，自动记住你的选择</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <div class="tts-loudness-heading">
+          <label class="form-label" for="ttsLoudnessInput">响度增强</label>
+          <output id="ttsLoudnessValue" for="ttsLoudnessInput">0 dB · 关闭</output>
+        </div>
+        <input id="ttsLoudnessInput" type="range" min="0" max="30" step="1" value="0" disabled aria-describedby="ttsLoudnessHelp ttsLoudnessStatus">
+        <div class="tts-loudness-scale"><span>0 · 原始音量</span><span>30 · 更响</span></div>
+        <p class="hint" id="ttsLoudnessHelp">松手自动保存到当前手机，从下一段语音生效。无需点击“保存全部设置”。</p>
+        <p class="hint" id="ttsLoudnessStatus" role="status">请在手机 App 中调整。</p>
+      </div>
+    </details>
+
     <details class="settings-card" open>
       <summary>
         <div class="summary-title">
@@ -644,15 +677,24 @@ body[data-theme="light"] .transport-mode-btn.is-active {
       <summary>
         <div class="summary-title">
           <strong>🛡 哨兵与向量模型</strong>
-          <span>前置图片识别、位置/监控哨兵、记忆库 Embedding</span>
+          <span>定时巡逻、环境唤醒、图片代看、记忆库 Embedding</span>
         </div>
         <span class="summary-chevron">›</span>
       </summary>
       <div class="card-body">
         <div class="sub-block">
-          <p class="sub-title">前置 & 哨兵模型（自定义中转站）</p>
-          <p class="hint">留空则默认走 Gemini 官方 API + 上方 Free Key。</p>
+          <p class="sub-title">定时巡逻哨兵</p>
           <div class="settings-grid">
+            <div class="field full">
+              <label class="form-label" for="sentinelRouteInput">当前巡逻线路</label>
+              <select class="form-input" id="sentinelRouteInput" onchange="updateSentinelRouteUi()">
+                <option value="original">原线路（自定义 / Qwen / Gemini）</option>
+                <option value="codex_luna">GPT-5.6 Luna（Codex 登录态）</option>
+              </select>
+            </div>
+          </div>
+          <p class="hint" id="sentinelRouteHint">原线路继续使用下方配置；留空则走 Gemini 官方 API + 上方 Free Key。</p>
+          <div class="settings-grid" id="sentinelOriginalFields">
             <div class="field">
               <label class="form-label">API 地址（Base URL）</label>
               <input class="form-input mono-input" type="text" id="sentinelBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off">
@@ -778,6 +820,7 @@ body[data-theme="light"] .transport-mode-btn.is-active {
 </div>
 <script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
+<script src="/static/tts-loudness-settings.js"></script>
 <script>
 connectCommonWS();
 
@@ -1061,6 +1104,19 @@ function collectCustomRoutes() {
   return routes;
 }
 
+function updateSentinelRouteUi() {
+  var route = $("sentinelRouteInput").value;
+  var useLuna = route === "codex_luna";
+  var fields = $("sentinelOriginalFields");
+  fields.style.opacity = useLuna ? "0.48" : "1";
+  fields.querySelectorAll("input").forEach(function(input) {
+    input.disabled = useLuna;
+  });
+  $("sentinelRouteHint").textContent = useLuna
+    ? "Luna 使用本机 Codex / ChatGPT 登录态，支持看图；推理固定关闭（none），优先缩短巡逻等待。下方原线路配置会保留。"
+    : "原线路继续使用下方配置；留空则走 Gemini 官方 API + 上方 Free Key。";
+}
+
 (async function init() {
   var loaded = await Promise.all([
     api("GET", "/api/settings"),
@@ -1076,9 +1132,11 @@ function collectCustomRoutes() {
   }) : [];
   $("geminiKeyInput").value = s.gemini_key || "";
   $("geminiFreeKeyInput").value = s.gemini_free_key || "";
+  $("sentinelRouteInput").value = s.sentinel_route === "codex_luna" ? "codex_luna" : "original";
   $("sentinelBaseUrlInput").value = s.sentinel_base_url || "";
   $("sentinelApiKeyInput").value = s.sentinel_api_key || "";
   $("sentinelModelInput").value = s.sentinel_model || "";
+  updateSentinelRouteUi();
   $("embeddingBaseUrlInput").value = s.embedding_base_url || "";
   $("embeddingApiKeyInput").value = s.embedding_api_key || "";
   $("embeddingModelInput").value = s.embedding_model || "";
@@ -1131,6 +1189,7 @@ async function saveSettings() {
   await api("PUT", "/api/settings", {
     gemini_key: $("geminiKeyInput").value.trim(),
     gemini_free_key: $("geminiFreeKeyInput").value.trim(),
+    sentinel_route: $("sentinelRouteInput").value,
     sentinel_base_url: $("sentinelBaseUrlInput").value.trim(),
     sentinel_api_key: $("sentinelApiKeyInput").value.trim(),
     sentinel_model: $("sentinelModelInput").value.trim(),

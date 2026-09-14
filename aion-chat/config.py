@@ -83,6 +83,13 @@ def save_settings(data: dict):
 
 SETTINGS = load_settings()
 
+SENTINEL_ROUTES = {"original", "codex_luna"}
+
+
+def normalize_sentinel_route(value) -> str:
+    route = str(value or "original").strip().lower()
+    return route if route in SENTINEL_ROUTES else "original"
+
 def get_key(provider: str) -> str:
     if provider == "gemini":
         return SETTINGS.get("gemini_key", "")
@@ -94,27 +101,45 @@ def get_key(provider: str) -> str:
 
 def get_sentinel_config() -> dict:
     """
-    返回哨兵/前置模型的配置。
-    若用户配置了自定义 URL，走 OpenAI 兼容格式；否则走 Gemini 原生 API。
-    返回: {"base_url": str, "api_key": str, "model": str, "use_openai": bool}
+    返回哨兵模型配置。Luna 使用本机 Codex 登录态；原线路保持兼容。
     """
+    route = normalize_sentinel_route(SETTINGS.get("sentinel_route"))
+    if route == "codex_luna":
+        return {
+            "route": "codex_luna",
+            "provider": "codex",
+            "base_url": "",
+            "api_key": "",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "none",
+            "use_openai": False,
+            "ready": True,
+        }
+
     base_url = SETTINGS.get("sentinel_base_url", "").strip()
     api_key = SETTINGS.get("sentinel_api_key", "").strip()
     model = SETTINGS.get("sentinel_model", "").strip()
     if base_url and api_key:
         # 自定义中转站 / 硅基流动等 OpenAI 兼容
         return {
+            "route": "original",
+            "provider": "openai_compatible",
             "base_url": base_url.rstrip("/"),
             "api_key": api_key,
             "model": model or "Qwen/Qwen3.6-35B-A3B",
             "use_openai": True,
+            "ready": True,
         }
     # 默认走 Gemini 原生
+    gemini_key = get_key("gemini_free")
     return {
+        "route": "original",
+        "provider": "gemini",
         "base_url": "",
-        "api_key": get_key("gemini_free"),
+        "api_key": gemini_key,
         "model": model or "gemini-3.1-flash-lite",
         "use_openai": False,
+        "ready": bool(gemini_key),
     }
 
 def get_embedding_config() -> dict:

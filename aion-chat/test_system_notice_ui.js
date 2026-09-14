@@ -67,9 +67,22 @@ function chatroomSystemRenderer() {
     window: { LoungeVisitUI: null, MonitorCameraSnapshot, SystemNoticeUI, TaobaoCards: null },
   };
   vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'static', 'repair-result-card.js'), 'utf8'), context);
   vm.runInContext(`${blocks}\nthis.renderSystem = msgHTML;`, context);
   return context.renderSystem;
 }
+
+test('repair results render one summary card without repeating the system text', () => {
+  const summary='已完成文档写入及图片交付，文件内容读回一致。';
+  const html=chatroomSystemRenderer()({id:'repair-1',sender:'system',content:'🛠️ 维修室 · 测试\n用户已验收\n'+summary,
+    attachments:[{type:'repair_result',task_id:'a'.repeat(32),summary}]});
+  assert.equal(html.split(summary).length-1,1);
+  assert.doesNotMatch(html,/system-notice-marker|system-event-text/);
+  assert.match(html,/repair-result-card/);
+  const escaped=chatroomSystemRenderer()({id:'repair-2',sender:'system',content:'标题\n状态',
+    attachments:[{type:'repair_result',task_id:'b'.repeat(32),summary:'<script>bad</script>'}]});
+  assert.doesNotMatch(escaped,/<script>/);
+});
 
 test('private and chatroom system messages render one visible system marker', () => {
   const privateHtml = privateSystemRenderer()({

@@ -10,10 +10,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#ff8359">
-<link rel="stylesheet" href="/static/chat.css?v=private-monologue-spacing-20260905">
+<link rel="stylesheet" href="/static/chat.css?v=compact-settings-20260912">
+<link rel="stylesheet" href="/static/pat.css?v=inline-order-20260910">
 <link rel="stylesheet" href="/static/proactive-orbit.css?v=20260817f">
 <link rel="stylesheet" href="/static/taobao-card.css?v=20260831-bubble-aligned">
 <link rel="stylesheet" href="/static/voice-call.css?v=voice-call-polish-20260704g">
+<link rel="stylesheet" href="/static/chat-font-size.css?v=20260912">
 </head>
 <body data-theme="dark">
 
@@ -165,6 +167,12 @@
       <button class="config-btn" onclick="toggleConfig(event)">&#9881;</button>
     </div>
     <div class="config-popup" id="configPopup">
+      <div class="chat-font-size-control" data-chat-font-size role="group" aria-label="聊天字号">
+        <span>聊天字号</span>
+        <button type="button" data-font-decrease aria-label="缩小聊天字号" title="缩小字号">A−</button>
+        <output aria-live="polite">13.5</output>
+        <button type="button" data-font-increase aria-label="放大聊天字号" title="放大字号">A+</button>
+      </div>
       <label>模型</label>
       <select id="modelSelect" onchange="changeModel()"></select>
       <label>上下文数量</label>
@@ -183,11 +191,14 @@
         <span class="slider-val" id="maxTokensValue">不限</span>
       </div>
       <div class="cam-section">
-        <div class="cam-section-title">◈ 语音合成 (TTS)</div>
+        <div class="private-voice-heading">
+          <span class="cam-section-title">语音播放</span>
+          <a class="voice-library-btn" href="/tts-test" onclick="openSubPage('/tts-test'); return false" title="试听并挑选音色">试听音色 <span aria-hidden="true">↗</span></a>
+        </div>
         <div class="tts-voice-row">
-          <label>音色</label>
+          <label>线路 / 音色</label>
           <select id="ttsVoiceSelect" onchange="changeTTSVoice()"><option value="">加载中...</option></select>
-          <button onclick="refreshTTSVoices()" style="background:none;border:none;cursor:pointer;font-size:14px" title="刷新音色列表">🔄</button>
+          <button type="button" class="voice-refresh-btn" onclick="refreshTTSVoices()" aria-label="刷新音色列表" title="刷新音色列表">↻</button>
         </div>
       </div>
       <div class="cam-section">
@@ -210,34 +221,8 @@
           <input type="text" id="voiceWakeWord" value="老公" style="flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;outline:none" onchange="updateVoiceWakeWord()">
         </div>
       </div>
-      <div class="cam-section">
-        <div class="cam-toggle-row">
-          <span class="cam-toggle-label">允许 AI 发起视频通话</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="videoCallToggle" onchange="toggleVideoCallEnabled()">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-      <div class="cam-section">
-        <div class="cam-toggle-row">
-          <span class="cam-toggle-label">允许 AI 生成图片</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="imageGenToggle" onchange="toggleImageGenEnabled()">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-      <div class="cam-section">
-        <div class="cam-toggle-row">
-          <span class="cam-toggle-label">允许 AI 生成歌曲</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="songGenToggle" onchange="toggleSongGenEnabled()">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-      <div class="cam-section">
+      <details class="cam-section private-advanced-settings">
+        <summary>高级设置</summary>
         <div class="cam-toggle-row">
           <span class="cam-toggle-label">允许 CLI 模型调用工具</span>
           <label class="toggle-switch">
@@ -245,7 +230,7 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
-      </div>
+      </details>
     </div>
     <div class="context-bar" style="display:none">
       <span class="context-label">上下文:</span>
@@ -314,7 +299,17 @@
 // Start the desktop before any external chat script can block the parser.
 // chat.js adopts this same frame once it is ready, preserving early navigation.
 (() => {
-  if (new URLSearchParams(location.search).has('conv')) return;
+  const launchParams = new URLSearchParams(location.search);
+  if (launchParams.has('conv')) return;
+  // Native wakeups enter /chat, with the requested feature inside its shell.
+  // This preserves shared back navigation and the status-bar inset for every page.
+  let startupPage = '/';
+  try {
+    const target = new URL(launchParams.get('page') || '/', location.origin);
+    if (target.origin === location.origin && !/^\/chat\/?$/.test(target.pathname)) {
+      startupPage = target.pathname + target.search + target.hash;
+    }
+  } catch (_) {}
   const overlay = document.getElementById('subPageOverlay');
   const frame = document.createElement('iframe');
   frame.className = 'sub-page-frame';
@@ -341,7 +336,7 @@
     window.openSubPage('/');
     return 'handled';
   };
-  window.openSubPage('/');
+  window.openSubPage(startupPage);
 })();
 </script>
 <script src="/static/hug_pillow_ai.js?v=hug-pillow-ai-20260726"></script>
@@ -353,9 +348,13 @@
 <script src="/static/taobao-card.js?v=20260831-compact"></script>
 <script src="/static/native-tts-audio.js?v=20260903-mix"></script>
 <script src="/static/vendor/markdown-it-15.0.1.min.js?v=15.0.1"></script>
-<script src="/static/chatroom-markdown.js?v=user-markdown-bubbles-20260904"></script>
+<script src="/static/chatroom-markdown.js?v=chinese-strong-20260906"></script>
 <script src="/static/message-row-focus.js?v=20260904-editor-focus"></script>
-<script src="/static/chat.js?v=desktop-shell-20260905"></script>
+<script src="/static/pat.js?v=inline-order-20260910"></script>
+<script src="/static/generation-control.js?v=stop-20260908"></script>
+<script src="/static/tts-voices.js?v=favorites-20260912"></script>
+<script src="/static/chat-font-size.js?v=20260912"></script>
+<script src="/static/chat.js?v=compact-settings-20260912"></script>
 <script src="/static/voice-call-policy.js?v=voice-latency-20260902a"></script>
 <script src="/static/voice-call.js?v=voice-latency-20260902a"></script>
 

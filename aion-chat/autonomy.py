@@ -397,8 +397,8 @@ async def _call_actor(actor: str, messages: list[dict]) -> str:
     return await _collect(stream_ai(messages, await _aion_model(), {}))
 
 
-async def _actor_context(actor: str, limit: int = 30) -> list[dict]:
-    room_id = await _latest_group_room_id()
+async def _actor_context(actor: str, limit: int = 30, *, include_history: bool = True) -> list[dict]:
+    room_id = await _latest_group_room_id() if include_history else None
     wb = load_worldbook()
     messages: list[dict] = []
     if actor == "aion":
@@ -409,6 +409,8 @@ async def _actor_context(actor: str, limit: int = 30) -> list[dict]:
         if wb.get("user_persona"):
             messages.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
             messages.append({"role": "assistant", "content": "收到。"})
+        if not include_history:
+            return messages
         timeline = await fetch_merged_timeline("aion", limit, room_id=room_id)
         messages.extend(render_merged_timeline(
             timeline,
@@ -429,6 +431,8 @@ async def _actor_context(actor: str, limit: int = 30) -> list[dict]:
         user_name, _, _ = _names()
         messages.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         messages.append({"role": "assistant", "content": "收到。"})
+    if not include_history:
+        return messages
     timeline = await fetch_merged_timeline("connor", limit, room_id=room_id)
     messages.extend(render_merged_timeline(
         timeline,
@@ -704,7 +708,14 @@ async def _save_aion_private_message(
                 "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?,?,?,?,?)",
                 (conv_id, "空闲消息", model or DEFAULT_MODEL, now, now),
             )
-        msg_id = f"msg_{int(now * 1000)}_idle"
+        await db.commit()
+    msg_id = f"msg_{int(now * 1000)}_idle"
+    from pat_commands import process_pat_commands
+    content = await process_pat_commands(
+        content, source_type="private", source_id=conv_id,
+        sender="aion", source_msg_id=msg_id,
+    )
+    async with get_db() as db:
         await db.execute(
             "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
             (msg_id, conv_id, "assistant", content, now, json.dumps(att_list, ensure_ascii=False)),
@@ -837,6 +848,20 @@ async def _run_web_journey(actor: str, session_id: str):
     )
 
 
+async def _save_autonomy_chatroom_message(room_id, sender, content, **kwargs):
+    """Parse pats in autonomous messages that bypass the normal reply pipeline."""
+    from pat_commands import PAT_COMMAND_PATTERN, process_pat_commands
+    from routes.chatroom import _save_msg
+
+    if PAT_COMMAND_PATTERN.search(content or ""):
+        msg_id = kwargs.setdefault("msg_id", f"cm_{time.time_ns()}_{sender[:1]}")
+        content = await process_pat_commands(
+            content, source_type="chatroom", source_id=room_id,
+            sender=sender, source_msg_id=msg_id,
+        )
+    return await _save_msg(room_id, sender, content, **kwargs)
+
+
 async def _save_private_message(
     actor: str,
     content: str,
@@ -851,8 +876,7 @@ async def _save_private_message(
             if target and target.startswith("chatroom:"):
                 room_id = target.split(":", 1)[1]
                 if room_id:
-                    from routes.chatroom import _save_msg
-                    return await _save_msg(
+                    return await _save_autonomy_chatroom_message(
                         room_id,
                         "aion",
                         content,
@@ -871,8 +895,7 @@ async def _save_private_message(
         room_id = manager.get_connor_last_active() or await _latest_connor_room_id()
     if not room_id:
         return None
-    from routes.chatroom import _save_msg
-    return await _save_msg(
+    return await _save_autonomy_chatroom_message(
         room_id,
         "connor",
         content,
@@ -1185,7 +1208,7 @@ async def _run_role_chat(actor: str, selected: dict | None = None) -> dict:
     message = str((selected or {}).get("message") or "").strip()
     if not message:
         raise RuntimeError("role_chat 动作没有生成可发送的消息")
-    await _save_msg(room_id, actor, message)
+    await _save_autonomy_chatroom_message(room_id, actor, message)
     room, msgs = await _load_room_and_messages(room_id, 50)
     queue: asyncio.Queue = asyncio.Queue()
     context_limit = room.get("context_minutes", 30) if room else 30
@@ -1443,6 +1466,10 @@ async def _home_dynamics_text(hours: int = 6, limit: int = 80) -> str:
             title = _idle_event_home_title(r, shown_diary_ids, shown_moment_ids)
             if title:
                 items.append((r["created_at"], title))
+    from memory_compression import list_compression_events
+    for event in await list_compression_events(since=cutoff, limit=limit):
+        text = event["title"] + (f"：{event['reflection']}" if event["reflection"] else "")
+        items.append((event["timestamp"], text))
     if not items:
         return "（近6小时暂无家庭动态）"
     items.sort(key=lambda x: x[0])
@@ -1519,6 +1546,13 @@ async def _home_dynamics_snapshot(hours: int = 6, limit: int = 80) -> tuple[str,
                     "title": title,
                 })
 
+    from memory_compression import list_compression_events
+    for event in await list_compression_events(since=cutoff, limit=limit):
+        items.append({
+            "kind": event["kind"], "id": event["source_id"], "author": event["author"],
+            "created_at": event["timestamp"],
+            "title": event["title"] + (f"：{event['reflection']}" if event["reflection"] else ""),
+        })
     items.sort(key=lambda x: x["created_at"])
     items = items[-limit:]
     for idx, item in enumerate(items, 1):
@@ -1581,7 +1615,7 @@ async def _run_home_group_tease(actor: str, result: dict, items: list[dict], tex
     message = _clip(str(result.get("group_message") or "").strip(), 500)
     if not message:
         message = f"{target_name}，我刚看到家庭动态里那条：{_clip(context, 120)}"
-    await _save_msg(room_id, actor, message)
+    await _save_autonomy_chatroom_message(room_id, actor, message)
     room, msgs = await _load_room_and_messages(room_id, 50)
     queue: asyncio.Queue = asyncio.Queue()
     context_limit = room.get("context_minutes", 30) if room else 30

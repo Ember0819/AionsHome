@@ -289,7 +289,7 @@
 <script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
 <script src="/static/vendor/markdown-it-15.0.1.min.js?v=15.0.1"></script>
-<script src="/static/chatroom-markdown.js?v=social-markdown-20260904"></script>
+<script src="/static/chatroom-markdown.js?v=chinese-strong-20260906"></script>
 <script>
 const PAGE_SIZE = 50;
 const MOMENTS_SNAPSHOT_KEY = 'moments_page_snapshot_v2';
@@ -299,6 +299,7 @@ let allMoments = [];
 let momentsNextCursor = null;
 let momentsHasMore = false;
 let momentsLoading = false;
+let momentsRefreshPending = false;
 let nameMap = {};  // author → display name
 let pendingMomentAttachments = [];
 
@@ -329,7 +330,10 @@ async function init() {
 
 // ── 加载朋友圈 ──
 async function loadMoments(page = 1, append = false) {
-  if (momentsLoading) return;
+  if (momentsLoading) {
+    if (!append) momentsRefreshPending = true;
+    return;
+  }
   momentsLoading = true;
   try {
     const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) });
@@ -352,6 +356,10 @@ async function loadMoments(page = 1, append = false) {
     console.error('加载朋友圈失败:', e);
   } finally {
     momentsLoading = false;
+    if (momentsRefreshPending) {
+      momentsRefreshPending = false;
+      void loadMoments(1, false);
+    }
   }
 }
 
@@ -592,6 +600,7 @@ function prependMomentOnce(moment) {
     return false;
   }
   allMoments.unshift(moment);
+  allMoments.sort((a, b) => b.created_at - a.created_at);
   totalItems++;
   return true;
 }
@@ -803,7 +812,7 @@ document.getElementById('publishInput').addEventListener('input', function() {
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
 });
 
-// ── WebSocket 实时推送；sync_event 断线补齐也走同一幂等处理 ──
+// ── WebSocket 实时推送 ──
 function handleMomentWsMessage(msg) {
   if (msg.type === 'moment_new' && msg.data) {
     // POST 返回和 WebSocket 广播可能先后到达；按 id 保证只插入一次。
@@ -849,9 +858,14 @@ function handleMomentWsMessage(msg) {
   } else {
     return;
   }
+  // 列表请求期间收到新变动，再取一次，避免较早的响应覆盖实时更新。
+  if (momentsLoading) momentsRefreshPending = true;
   saveMomentsSnapshot();
 }
-if (typeof connectCommonWS === 'function') connectCommonWS(handleMomentWsMessage);
+// 重连/回到前台直接读取当前列表，避免历史事件回放覆盖最新内容。
+if (typeof connectCommonWS === 'function') connectCommonWS(handleMomentWsMessage, {
+  reconcile: () => loadMoments(1, false),
+});
 
 document.getElementById('momentsList').addEventListener('scroll', function() {
   if (momentsHasMore && !momentsLoading && this.scrollTop + this.clientHeight >= this.scrollHeight - 160) {

@@ -169,6 +169,15 @@ class OpenClawWeixinBridgeRuntime:
         self._task = None
 
     async def _run_loop(self) -> None:
+        # Repair modes saved by older versions that only moved the inbound binding.
+        from wechat_mode import sync_wechat_mode_binding
+
+        changed = False
+        for binding in (self.settings.get("wechat_bridge_bindings") or {}).values():
+            if isinstance(binding, dict):
+                changed = sync_wechat_mode_binding(self.settings, binding, now=self.now()) or changed
+        if changed:
+            await _maybe_await(self.save_settings(self.settings))
         while not self._stopping.is_set():
             try:
                 await self.poll_once()

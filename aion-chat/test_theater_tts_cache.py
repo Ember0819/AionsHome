@@ -6,6 +6,16 @@ from unittest.mock import patch
 
 
 class TheaterTTSCacheTests(unittest.TestCase):
+    def test_studio_cleanup_matches_only_the_recording_numeric_chunks(self):
+        from theater_tts_cache import delete_studio_audio_files
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);aid='na_'+'a'*32
+            deleted=[f'{aid}_0.mp3',f'{aid}_12.mp3']
+            kept=[f'{aid}_12_backup.mp3',f'{aid}_other_0.mp3','tm_keep.mp3']
+            for name in deleted+kept:(root/name).write_bytes(b'audio')
+            delete_studio_audio_files([aid,'../tm_keep'],root)
+            self.assertEqual({p.name for p in root.iterdir()},set(kept))
+
     def test_maps_merged_and_segment_names_to_the_same_message_id(self):
         from theater_tts_cache import message_id_from_audio_path
 

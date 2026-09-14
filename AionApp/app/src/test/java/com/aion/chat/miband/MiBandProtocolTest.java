@@ -105,6 +105,20 @@ public class MiBandProtocolTest {
     }
 
     @Test
+    public void managedHealthSettingsLeaveSleepMonitoringUntouched() {
+        List<byte[]> settings = MiBandProtocol.buildManagedHealthSettings();
+
+        assertEquals(4, settings.size());
+        assertArrayEquals(hex("0508020001011001"), settings.get(0));
+        assertArrayEquals(hex("0508020001120b00"), settings.get(1));
+        assertArrayEquals(hex("0508020001130b00"), settings.get(2));
+        assertArrayEquals(hex("0508020001310b00"), settings.get(3));
+        for (byte[] setting : settings) {
+            assertNotEquals(0x11, setting[5] & 0xff);
+        }
+    }
+
+    @Test
     public void notificationPayloadContainsConfiguredSenderAndNoteAsUtf8Body() {
         byte[] payload = MiBandProtocol.buildNotification(0x12345678, "星澜", "滚起来活动！");
 

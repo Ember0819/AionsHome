@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 
 def _create_theater_schema(db_path: Path):
@@ -57,6 +57,61 @@ def _insert_conversation(db_path: Path, conv_id: str, message_ids: list[str]):
 
 
 class TheaterAudioDeletionTests(unittest.TestCase):
+    def test_deletion_cleans_all_recordings_but_preserves_generated_images(self):
+        import database
+        import theater_studio as studio
+        from routes import theater as route
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);db_path=root/'chat.db';cache=root/'cache';cache.mkdir()
+            uploads=root/'uploads';uploads.mkdir()
+            for name in ('old-scene.png','old-version.png','shared-photo.png','new-scene.png'):
+                (uploads/name).write_bytes(b'image')
+            _create_theater_schema(db_path)
+            _insert_conversation(db_path,'tc_delete',['tm_delete','tm_remaining'])
+            _insert_conversation(db_path,'tc_keep',['tm_keep'])
+            for name in ('tm_delete.mp3','tm_delete_s0.mp3','tm_remaining.mp3','tm_keep.mp3'):
+                (cache/name).write_bytes(b'original')
+            async def exercise():
+                for mid in ('tm_delete','tm_remaining'):
+                    await studio.legacy_message_audio(mid,dict(conv_id='tc_delete',revision=1,content='story'))
+                await studio.save(dict(id='chapter_delete',kind='chapter',conv_id='tc_delete',content='正文',revision=2,status='ready',
+                                       images=[{'url':'/uploads/old-scene.png'},{'url':'/uploads/shared-photo.png'}],
+                                       versions=[{'images':[{'url':'/uploads/old-version.png'}]}]))
+                await studio.save(dict(id='anchor_shared',kind='anchor',conv_id='',image='/uploads/shared-photo.png'))
+                await studio.save(dict(id='chapter_keep',kind='chapter',conv_id='tc_keep',images=[{'url':'/uploads/new-scene.png'}]))
+                await studio.save(dict(id='outline_draft_tc_delete',kind='outline_draft',conv_id='tc_delete',confirmed_conversation={'id':'tc_keep'}))
+                recordings=[]
+                for source,cid,voice,revision in [('tm_delete','tc_delete','one',1),('tm_delete','tc_delete','two',1),
+                                                ('chapter_delete','tc_delete','one',1),('chapter_delete','tc_delete','two',2),
+                                                ('tm_keep','tc_keep','one',1)]:
+                    aid=studio.uid('na_');recordings.append((source,aid))
+                    await studio.save(dict(id=aid,kind='audio',conv_id=cid,source=source,voice=voice,revision=revision,
+                                           status='ready',offset=1,segments=[dict(seq=0)]))
+                    (cache/f'{aid}_0.mp3').write_bytes(b'recorded')
+                    # A chunk written immediately before cancellation may not be in the manifest.
+                    (cache/f'{aid}_1.mp3').write_bytes(b'uncommitted')
+                await route.delete_message('tm_delete')
+                self.assertFalse((cache/'tm_delete.mp3').exists())
+                self.assertFalse((cache/'tm_delete_s0.mp3').exists())
+                self.assertIsNone(await studio.load('legacy_tm_delete'))
+                for source,aid in recordings:
+                    self.assertEqual((cache/f'{aid}_0.mp3').exists(),source!='tm_delete')
+                    self.assertEqual((cache/f'{aid}_1.mp3').exists(),source!='tm_delete')
+                await route.delete_conversation('tc_delete')
+                self.assertEqual(await studio.rows('tc_delete'),[])
+                self.assertFalse((cache/'tm_remaining.mp3').exists())
+                kept=next(aid for source,aid in recordings if source=='tm_keep')
+                self.assertEqual({p.name for p in cache.iterdir()}, {'tm_keep.mp3',f'{kept}_0.mp3',f'{kept}_1.mp3'})
+                self.assertIsNotNone(await studio.load(kept))
+                self.assertIsNotNone(await studio.load('chapter_keep'))
+                self.assertEqual({p.name for p in uploads.iterdir()},
+                                 {'old-scene.png','old-version.png','shared-photo.png','new-scene.png'})
+                for image in uploads.iterdir():
+                    self.assertEqual(image.read_bytes(),b'image')
+            with patch.object(database,'DB_PATH',db_path),patch.object(route,'THEATER_TTS_CACHE_DIR',cache), \
+                 patch.object(studio,'THEATER_TTS_CACHE_DIR',cache),patch.object(studio,'UPLOADS_DIR',uploads),patch.object(route.manager,'broadcast',AsyncMock()):
+                asyncio.run(exercise())
+
     def _with_route_paths(self, db_path: Path, cache_dir: Path):
         import database
         from routes import theater as route

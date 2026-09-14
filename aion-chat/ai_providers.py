@@ -6,6 +6,8 @@ import json, base64, mimetypes, asyncio, shutil, subprocess, os, re, time, uuid
 from functools import lru_cache
 from pathlib import Path
 
+from generation_control import own_stream, own_process
+
 import httpx
 import tempfile
 
@@ -502,6 +504,7 @@ async def call_siliconflow(messages: list, model: str, meta: dict | None = None,
         payload["max_tokens"] = max_tokens
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            own_stream(resp)
             if resp.status_code != 200:
                 body = await resp.aread()
                 try:
@@ -555,6 +558,7 @@ async def call_gemini(messages: list, model: str, meta: dict | None = None, temp
         payload["generationConfig"] = gen_config
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream("POST", url, json=payload) as resp:
+            own_stream(resp)
             if resp.status_code != 200:
                 body = await resp.aread()
                 try:
@@ -598,6 +602,7 @@ async def call_aipro(messages: list, model: str, meta: dict | None = None, tempe
         payload["max_tokens"] = max_tokens
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            own_stream(resp)
             if resp.status_code != 200:
                 body = await resp.aread()
                 yield _decode_relay_body(body)
@@ -665,6 +670,7 @@ async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None
         payload["reasoning_effort"] = cfg.get("reasoning_effort", "high")
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            own_stream(resp)
             if resp.status_code != 200:
                 body = await resp.aread()
                 yield _decode_relay_body(body)
@@ -990,6 +996,7 @@ async def _spawn_cli_process(cmd: list[str], prompt: str, env: dict | None = Non
         env=env,
         limit=8 * 1024 * 1024,
     )
+    own_process(proc)
     proc.stdin.write(prompt.encode("utf-8"))
     await proc.stdin.drain()
     proc.stdin.close()
@@ -1797,6 +1804,33 @@ def _build_codex_chat_command(
     return build_codex_app_server_command(node, script, overrides)
 
 
+def _build_codex_sentinel_command(
+    node: str,
+    script: str,
+    skill_files=None,
+) -> list[str]:
+    """Build a small, tool-free Codex profile for latency-sensitive patrols."""
+    overrides = [
+        'model_reasoning_effort="none"',
+        'model_verbosity="low"',
+        'developer_instructions="You are the AionsHome sentinel classifier. Follow the user prompt exactly and return only the requested result. Do not use tools."',
+        "features.shell_tool=false",
+        "features.multi_agent=false",
+        'features.multi_agent_v2={ root_agent_usage_hint_text = "", multi_agent_mode_hint_text = "" }',
+        "features.remote_plugin=false",
+        "include_apps_instructions=false",
+        "include_permissions_instructions=false",
+        "include_collaboration_mode_instructions=false",
+        "include_environment_context=false",
+    ]
+    disabled_skills = (
+        tuple(skill_files) if skill_files is not None else _discover_codex_skill_files()
+    )
+    if disabled_skills:
+        overrides.append(_build_disabled_skills_override(disabled_skills))
+    return build_codex_app_server_command(node, script, overrides)
+
+
 _CODEX_REASONING_SUMMARIES = {"auto", "concise", "detailed", "none"}
 _CODEX_SEMAPHORE_LOOP = None
 _CODEX_SEMAPHORE_LIMIT = 0
@@ -1916,7 +1950,7 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
     try:
         env = _build_codex_chat_environment()
         async with _codex_semaphore():
-            async for event in stream_codex_app_server(
+            async for event in own_stream(stream_codex_app_server(
                 cmd,
                 env=env,
                 cwd=_CODEX_WORKSPACE,
@@ -1924,7 +1958,7 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                 prompt=prompt,
                 image_paths=list(image_paths),
                 reasoning_summary=_codex_reasoning_summary(),
-            ):
+            )):
                 if event.kind == "text_delta" and event.text:
                     yield event.text
                 elif event.kind == "reasoning_delta" and event.text:
@@ -1944,6 +1978,54 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
         yield "[CodexCLI错误] 无法启动 Codex CLI 进程"
     except Exception as e:
         yield f"[CodexCLI错误] {e}"
+
+
+async def call_codex_sentinel(
+    prompt: str,
+    *,
+    model: str = "gpt-5.6-luna",
+    image_b64: str | None = None,
+    mime_type: str = "image/jpeg",
+    timeout: int = 60,
+) -> str:
+    """Run one isolated Luna sentinel turn through the local Codex login."""
+    if not _CODEX_SCRIPT:
+        raise RuntimeError("未找到 Codex CLI，无法使用 GPT-5.6 Luna 哨兵线路")
+
+    node = shutil.which("node") or "node"
+    command = _build_codex_sentinel_command(node, _CODEX_SCRIPT)
+    env = _build_codex_chat_environment()
+
+    async def _run(workspace: str, image_paths: list[str]) -> str:
+        chunks: list[str] = []
+        async with _codex_semaphore():
+            async for event in stream_codex_app_server(
+                command,
+                env=env,
+                cwd=workspace,
+                model=model,
+                prompt=prompt,
+                image_paths=image_paths,
+                reasoning_summary="none",
+            ):
+                if event.kind == "text_delta" and event.text:
+                    chunks.append(event.text)
+        return "".join(chunks).strip()
+
+    with tempfile.TemporaryDirectory(prefix="aionshome-sentinel-") as temp_dir:
+        image_paths: list[str] = []
+        if image_b64:
+            suffix = mimetypes.guess_extension(mime_type) or ".jpg"
+            image_path = Path(temp_dir) / f"sentinel_input{suffix}"
+            image_path.write_bytes(base64.b64decode(image_b64))
+            image_paths.append(str(image_path))
+        try:
+            return await asyncio.wait_for(
+                _run(temp_dir, image_paths),
+                timeout=max(1, int(timeout)),
+            )
+        except TimeoutError as error:
+            raise RuntimeError(f"GPT-5.6 Luna 哨兵调用超过 {timeout} 秒") from error
 
 
 # ── 非流式调用（收集流式输出） ────────────────────

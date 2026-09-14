@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from config import DEFAULT_MODEL, DATA_DIR, SETTINGS, THEATER_TTS_CACHE_DIR, THEATER_TTS_SEGMENT_DELETE_DELAY_SECONDS
 from database import get_db
 from ws import manager
+import theater_studio
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from stream_safety import (
     THEATER_STREAM_POLICY,
@@ -32,8 +33,10 @@ _active_theater_tts: dict[str, tuple[str, TTSStreamer]] = {}
 _deleted_theater_conversations: set[str] = set()
 
 
-async def _consume_theater_stream(source, queue, tts_streamer=None) -> StreamSafetyResult:
+async def _consume_theater_stream(source, queue, tts_streamer=None, live_id=None) -> StreamSafetyResult:
     async def on_commit(chunk: str) -> None:
+        if live_id:
+            theater_studio.append_live(live_id, chunk)
         await queue.put({"type": "chunk", "content": chunk})
         if tts_streamer:
             await tts_streamer.feed_async(chunk)
@@ -324,6 +327,7 @@ async def delete_conversation(conv_id: str):
     except Exception:
         _deleted_theater_conversations.discard(conv_id)
         raise
+    await theater_studio.cleanup_conversation(conv_id)
     await asyncio.to_thread(
         delete_message_audio_files, message_ids, THEATER_TTS_CACHE_DIR
     )
@@ -362,6 +366,7 @@ async def list_messages(conv_id: str, limit: int = Query(50, ge=1, le=500), befo
 @router.delete("/messages/{msg_id}")
 async def delete_message(msg_id: str):
     _cancel_theater_tts_message(msg_id)
+    await theater_studio.invalidate_message(msg_id)
     deleted_conv_id = None
     async with get_db() as db:
         db.row_factory = __import__("aiosqlite").Row
@@ -381,6 +386,7 @@ async def delete_message(msg_id: str):
 
 @router.put("/messages/{msg_id}")
 async def update_message(msg_id: str, body: MsgUpdate):
+    await theater_studio.invalidate_message(msg_id)
     async with get_db() as db:
         db.row_factory = __import__("aiosqlite").Row
         await db.execute("UPDATE theater_messages SET content=? WHERE id=?", (body.content, msg_id))
@@ -465,6 +471,7 @@ async def send_message(conv_id: str, body: MsgCreate):
 
     ai_msg_id = f"tm_{int(time.time() * 1000)}_ai"
     _q: asyncio.Queue = asyncio.Queue()
+    theater_studio.begin_live(ai_msg_id, conv_id)
     usage_meta: dict = _StreamingReasoningMeta(_q)
 
     tts_streamer = None
@@ -506,6 +513,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                 content_stream(),
                 _q,
                 tts_streamer,
+                live_id=ai_msg_id,
             )
             full_text = stream_result.committed_text
             if stream_result.notice:
@@ -538,6 +546,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             import traceback
             traceback.print_exc()
         finally:
+            theater_studio.finish_live(ai_msg_id)
             if tts_streamer:
                 try:
                     await _flush_and_cleanup_theater_tts(tts_streamer, ai_msg_id)
@@ -606,6 +615,7 @@ async def regenerate_message(conv_id: str, body: TheaterRegenerateRequest,
             history.append(d)
 
     _cancel_theater_tts_message(body.message_id)
+    await theater_studio.invalidate_message(body.message_id)
     await asyncio.to_thread(
         delete_message_audio_files, [body.message_id], THEATER_TTS_CACHE_DIR
     )
@@ -641,6 +651,7 @@ async def regenerate_message(conv_id: str, body: TheaterRegenerateRequest,
 
     ai_msg_id = f"tm_{int(time.time() * 1000)}_regen"
     _q: asyncio.Queue = asyncio.Queue()
+    theater_studio.begin_live(ai_msg_id, conv_id)
     usage_meta: dict = _StreamingReasoningMeta(_q)
 
     tts_streamer = None
@@ -682,6 +693,7 @@ async def regenerate_message(conv_id: str, body: TheaterRegenerateRequest,
                 content_stream(),
                 _q,
                 tts_streamer,
+                live_id=ai_msg_id,
             )
             full_text = stream_result.committed_text
             if stream_result.notice:
@@ -713,6 +725,7 @@ async def regenerate_message(conv_id: str, body: TheaterRegenerateRequest,
             import traceback
             traceback.print_exc()
         finally:
+            theater_studio.finish_live(ai_msg_id)
             if tts_streamer:
                 try:
                     await _flush_and_cleanup_theater_tts(tts_streamer, ai_msg_id)
@@ -732,3 +745,6 @@ async def regenerate_message(conv_id: str, body: TheaterRegenerateRequest,
             yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+router.include_router(theater_studio.router)
