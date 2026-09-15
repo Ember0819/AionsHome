@@ -1117,7 +1117,8 @@ async def build_aion_group_context(
     )
 
     # 3. 构建 recent_messages 用于本地前置路由
-    merged = await fetch_merged_timeline("aion", context_limit, room_id=room_id)
+    # 群聊窗口共享历史，合并所有群聊与该角色私聊后按配置取最新条数。
+    merged = await fetch_merged_timeline("aion", context_limit)
 
     recent_for_digest = []
     for msg in merged[-6:]:
@@ -1210,7 +1211,8 @@ async def build_connor_group_context(
     )
 
     # 2. 构建 recent_messages 用于本地前置路由
-    merged = await fetch_merged_timeline("connor", context_limit, room_id=room_id)
+    # 群聊窗口共享历史，合并所有群聊与该角色私聊后按配置取最新条数。
+    merged = await fetch_merged_timeline("connor", context_limit)
 
     recent_for_digest = []
     for msg in merged[-6:]:
@@ -1258,7 +1260,7 @@ async def build_connor_group_context(
     history.append({"role": "assistant", "content": "明白了。"})
 
     # 5. 统一时间线（合并 Connor 1v1 + 群聊消息）
-    merged = await fetch_merged_timeline("connor", context_limit, room_id=room_id)
+    merged = await fetch_merged_timeline("connor", context_limit)
     timeline_history = render_merged_timeline(
         merged,
         "connor",
