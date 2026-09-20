@@ -44,7 +44,7 @@ from wechat_bridge import (
 )
 from band_commands import process_band_vibration, with_band_vibration_attachment
 from hug_pillow_commands import process_hug_pillow_commands
-from pat_commands import process_pat_commands
+from capabilities import process_pat_commands
 from app_supervision_ai import (
     queue_app_supervision_reply_command,
     broadcast_app_supervision_command,
@@ -1136,22 +1136,23 @@ async def delete_message(msg_id: str):
 
 @router.put("/api/messages/{msg_id}")
 async def update_message(msg_id: str, body: MsgUpdate):
-    conv_id = None
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="内容不能为空")
     async with get_db() as db:
         db.row_factory = __import__('aiosqlite').Row
-        await db.execute("UPDATE messages SET content=? WHERE id=?", (body.content, msg_id))
-        await db.commit()
         cur = await db.execute("SELECT * FROM messages WHERE id=?", (msg_id,))
         msg = await cur.fetchone()
-        if msg:
-            d = dict(msg)
-            try: d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
-            except: d["attachments"] = []
-            conv_id = d["conv_id"]
-            await manager.broadcast({"type": "msg_updated", "data": d})
-    if conv_id:
-        await export_conversation(conv_id)
-    return {"ok": True}
+        if not msg:
+            raise HTTPException(status_code=404, detail="消息不存在")
+        if msg["role"] not in ("user", "assistant"):
+            raise HTTPException(status_code=400, detail="只能编辑聊天消息")
+        await db.execute("UPDATE messages SET content=? WHERE id=?", (body.content, msg_id))
+        await db.commit()
+        d = _message_dict_from_row(msg)
+        d["content"] = body.content
+    await manager.broadcast({"type": "msg_updated", "data": d})
+    await export_conversation(d["conv_id"])
+    return {"ok": True, "message": d}
 
 # ── 星标消息 ─────────────────────────────────────
 @router.patch("/api/messages/{msg_id}/star")
@@ -1551,6 +1552,8 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 ),
             )
 
+            from svakom_ai import process_commands as process_svakom_commands
+            full_text = await process_svakom_commands(full_text, ai_msg_id, conv_id=conv_id)
             toy_matches = TOY_CMD_PATTERN.findall(full_text)
             if toy_matches:
                 full_text = TOY_CMD_PATTERN.sub("", full_text).strip()
@@ -2212,6 +2215,8 @@ async def send_message(conv_id: str, body: MsgCreate):
             )
 
             # 检测 [TOY:x] 指令
+            from svakom_ai import process_commands as process_svakom_commands
+            full_text = await process_svakom_commands(full_text, ai_msg_id, conv_id=conv_id)
             toy_matches = TOY_CMD_PATTERN.findall(full_text)
             if toy_matches:
                 full_text = TOY_CMD_PATTERN.sub("", full_text).strip()
@@ -3700,6 +3705,8 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             )
 
             # 检测 [TOY:x] 指令
+            from svakom_ai import process_commands as process_svakom_commands
+            full_text = await process_svakom_commands(full_text, ai_msg_id, conv_id=conv_id)
             toy_matches = TOY_CMD_PATTERN.findall(full_text)
             if toy_matches:
                 full_text = TOY_CMD_PATTERN.sub("", full_text).strip()

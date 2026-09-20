@@ -104,18 +104,14 @@ def prose_length(text):
     return sum(not ch.isspace() for ch in text)
 
 
-def chapter_constraints(book, existing='', following=None, chapter=None):
+def chapter_constraints(book, existing='', chapter=None):
     lower, upper = chapter_limits(book, chapter)
     used = prose_length(existing)
-    bridge = min(500, upper // 20)
     prompt = (f'本章完整正文须在{lower}至{upper}字之间（含标点，不计空白），按本章内容选择长短，不必写满上限。'
               f'在预算内展开场景和对话，不得为凑字数重复或挪用后续章节剧情。'
               f'接近上限前主动收束，在本章计划的结束节点停笔。\n'
-              f'全书大纲仅作方向与伏笔背景，本次只执行当前章节计划。'
-              f'允许结尾用不超过{bridge}字衔接下一章，这部分计入本章总字数；'
-              f'只能留下引子、过渡或悬念，不得展开或完成下一章的核心事件、冲突与结果。\n')
-    if following:
-        prompt += f"下一章边界参考（本次不得展开）：第{following['number']}章《{following['title']}》：{following['plan']}\n"
+              f'本次只执行当前章节计划，写完本章结束节点即停笔；'
+              f'计划中提及的后章边界只用于限定本章范围，不得继续展开后续章节。\n')
     if existing:
         prompt += (f'本章已有{used}字，本次新增预算为{max(0, lower-used)}至{max(0, upper-used)}字，'
                    f'这是整章合计范围，不是再写一章。从已有正文末尾继续，不重复前文。\n')
@@ -401,23 +397,28 @@ async def write_chapter(key, instruction):
         book = await load(c['conv_id'])
         all_chapters = sorted(await rows(c['conv_id'], 'chapter'), key=lambda p: p['number'])
         previous = [p for p in all_chapters if p['number'] < c['number']]
-        following = next((p for p in all_chapters if p['number'] > c['number']), None)
         memories = []
         for p in previous:
             memories.append(f"第{p['number']}章："+(p.get('summary') or await summarize(p)))
         _, cast = await cast_text(book)
-        prompt = '写小说正文。只输出正文，不输出解释、配图提示或总结。\n'+chapter_constraints(book, text, following, c)
+        target = f"第{c['number']}章《{c['title']}》"
+        prompt = f'本次只写{target}，不得跳章或改写成其他章节。只输出本章正文，不输出解释、配图提示或总结。\n'
+        prompt += chapter_constraints(book, text, c)
         prompt += '本章计划若标明期望字数及场景预算，按其详略分配推进；字数范围以上面的当前设置为准，过时预算超出范围时按比例调整。略写场景不要扩成完整支线；核心变化与结束节点完成后收尾，不为填满上限重复动作、对白或情绪解释。\n'
-        prompt += f"已确认的故事共识：{book.get('consensus') or ''}\n人物：{cast}\n全书计划（尚未发生）：{book['outline']}\n已发生剧情：{chr(10).join(memories)}\n当前第{c['number']}章《{c['title']}》计划：{c['plan']}\n用户本次指导：{instruction}\n前章末尾：{previous[-1]['content'][-2500:] if previous else ''}\n"
+        prompt += f"【背景参考，不代表剧情已经发生】\n已确认的故事共识：{book.get('consensus') or ''}\n人物：{cast}\n"
+        prompt += f"【前章已发生剧情】\n{chr(10).join(memories) if previous else '无前章，尚无已发生剧情。这是故事的第一章。'}\n"
+        prompt += f"【当前唯一写作任务】\n当前{target}计划（待执行，不是已写正文）：\n{c['plan']}\n用户本次指导：{instruction}\n"
         if text:
-            prompt += f"本章已有正文（从末尾继续，不重复，写至本章结束）：\n{text}"
+            prompt += f"本次续写{target}，从下面已有正文末尾继续，不重写开头，也不进入下一章。\n本章已有正文（从末尾继续，不重复，写至本章结束）：\n{text}"
+        else:
+            prompt += f"现在从头写{target}。本章尚无正文，从本章计划的第一个场景开始，依次展开至本章结束节点；不得把本章计划当作已经发生的剧情，再接着写下一章。\n"
         from theater_planning import persona_for
         person = await persona_for(c['conv_id'], required=True)
         await change(key, context_characters={
             '角色人设': len(person['persona']), '故事共识': len(book.get('consensus') or ''),
-            '人物外貌文字': len(cast), '全书大纲': len(book['outline']),
+            '人物外貌文字': len(cast), '全书大纲': 0,
             '前章剧情摘要': len(chr(10).join(memories)), '本章计划': len(c['plan']),
-            '本次指导': len(instruction), '上一章结尾': len(previous[-1]['content'][-2500:]) if previous else 0,
+            '本次指导': len(instruction), '上一章结尾': 0,
             '本章已有正文': len(c['content']), '历史讨论原文': 0,
         })
         async def commit(chunk):
@@ -638,6 +639,7 @@ async def delete_recording_files(docs):
 class SpeechRequest(BaseModel):
     voice: str = ''
     prefer_cached: bool = True
+    allow_generation: bool = False
 
 
 async def legacy_message_audio(key, src):
@@ -690,7 +692,8 @@ async def run_speech(key, aid):
             path = Path(THEATER_TTS_CACHE_DIR) / f'{aid}_{seq}.mp3'
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-            audio['segments'].append(dict(seq=seq, url=f'/api/theater/studio/audio/{aid}/{seq}', chars=len(raw)))
+            audio['segments'].append(dict(seq=seq, url=f'/api/theater/studio/audio/{aid}/{seq}',
+                                          chars=len(raw), start=audio['offset'], end=audio['offset']+len(raw)))
             await change(aid, segments=audio['segments'], offset=audio['offset']+len(raw))
     except asyncio.CancelledError:
         await change(aid, status='stopped')
@@ -707,19 +710,31 @@ async def start_speech(key: str, body: SpeechRequest):
         src = await source_state(key)
         source_doc = await load(key)
         existing = await rows(src['conv_id'], 'audio')
-        if body.prefer_cached and not (source_doc and source_doc.get('kind') == 'chapter'):
-            cached = await legacy_message_audio(key, src)
+        is_chapter = source_doc and source_doc.get('kind') == 'chapter'
+        if body.prefer_cached:
+            cached = None if is_chapter else await legacy_message_audio(key, src)
             if not cached:
                 candidates = [a for a in existing if a['source'] == key and a['revision'] == src['revision']
-                              and a['status'] == 'ready' and a.get('segments') and not a.get('legacy')]
-                cached = next((a for a in candidates if a['voice'] == body.voice), candidates[-1] if candidates else None)
-                if cached and not all((Path(THEATER_TTS_CACHE_DIR)/f"{cached['id']}_{seg['seq']}.mp3").is_file() for seg in cached['segments']):
+                              and not a.get('legacy') and (a.get('segments') or
+                                  (a['status'] == 'running' and key in _speech))]
+                # Listening chooses the most complete recording, independent of the selected voice.
+                linked_id = source_doc.get('audio') if is_chapter else None
+                cached = max(candidates, key=lambda a: (a['status'] == 'ready', a.get('offset', 0),
+                                                       a['id'] == linked_id), default=None)
+                if cached and not all((p := Path(THEATER_TTS_CACHE_DIR)/f"{cached['id']}_{seg['seq']}.mp3").is_file()
+                                      and p.stat().st_size for seg in cached['segments']):
                     raise HTTPException(409, '已有语音记录的文件缺失，请检查缓存；未重新生成')
             if cached:
-                await stop_audio(key)
+                if cached['status'] != 'running':
+                    await stop_audio(key)
+                cached = await audio_status(cached['id'])
+                if is_chapter and source_doc.get('audio') != cached['id']:
+                    await change(key, audio=cached['id'])
                 return cached
             if any(a['source'] == key and a.get('legacy') for a in existing):
                 raise HTTPException(409, '旧语音文件暂时找不到，请检查缓存；未重新生成')
+        if not body.allow_generation:
+            return {'needs_confirmation': True}
         if not body.voice.strip():
             raise HTTPException(400, '没有可重听的语音，请先选择音色再生成')
         audio = next((a for a in reversed(existing) if a['source'] == key and a['revision'] == src['revision'] and a['voice'] == body.voice), None)

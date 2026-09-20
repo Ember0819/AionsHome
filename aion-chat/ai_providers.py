@@ -605,6 +605,8 @@ async def call_aipro(messages: list, model: str, meta: dict | None = None, tempe
             own_stream(resp)
             if resp.status_code != 200:
                 body = await resp.aread()
+                if meta is not None:
+                    meta["provider_error"] = f"HTTP {resp.status_code}: {_decode_relay_body(body)}"
                 yield _decode_relay_body(body)
                 return
             async for line in resp.aiter_lines():
@@ -668,11 +670,15 @@ async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None
         payload["max_tokens"] = max_tokens
     if cfg.get("use_default_reasoning_effort") is False:
         payload["reasoning_effort"] = cfg.get("reasoning_effort", "high")
+    reasoning_status_sent = False
+    content_started = False
     async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             own_stream(resp)
             if resp.status_code != 200:
                 body = await resp.aread()
+                if meta is not None:
+                    meta["provider_error"] = f"HTTP {resp.status_code}: {_decode_relay_body(body)}"
                 yield _decode_relay_body(body)
                 return
             async for line in resp.aiter_lines():
@@ -694,11 +700,18 @@ async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None
                         meta["raw"] = u
                     delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                    if meta is not None and reasoning:
-                        meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
+                    if reasoning:
+                        if meta is not None:
+                            meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
+                        if not reasoning_status_sent and not content_started:
+                            yield f"{CLI_STATUS_PREFIX}正在思考..."
+                            reasoning_status_sent = True
+                        # Reasoning is real stream activity even before visible text.
+                        yield StreamActivity()
                     if delta.get("content"):
+                        content_started = True
                         yield delta["content"]
-                except:
+                except Exception:
                     pass
 
 # ── Gemini CLI ────────────────────────────────────
@@ -2281,6 +2294,7 @@ async def stream_ai(messages: list, model_key: str, meta: dict | None = None, te
     if not cfg.get("vision", True) and _messages_have_images(normalized):
         yield f"{CLI_STATUS_PREFIX}哨兵模型正在识别图片内容..."
         normalized = await _sentinel_describe_images(normalized)
+        yield f"{CLI_STATUS_PREFIX}图片处理完成，正在等待模型回复..."
     async def _raw_chunks():
         if cfg["provider"] == "siliconflow":
             async for chunk in call_siliconflow(normalized, cfg["model"], meta, temperature, max_tokens):

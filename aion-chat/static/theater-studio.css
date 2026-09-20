@@ -17,6 +17,10 @@ body .app { background:transparent !important; }
 body .sidebar { background:var(--studio-panel) !important; width:270px; border-color:var(--border); }
 body .chat-header { position:relative; background:var(--studio-panel) !important; box-shadow:none; min-height:66px; }
 body .messages { padding:18px 12px; gap:18px; background:transparent !important; }
+body.studio-shell .messages { --reader-scroll-thumb:rgba(166,181,255,.62); --reader-scroll-hover:rgba(190,201,255,.85); }
+body.studio-shell[data-theme="light"] .messages { --reader-scroll-thumb:rgba(92,108,183,.58); --reader-scroll-hover:rgba(76,93,170,.8); }
+body.studio-shell .messages::-webkit-scrollbar-thumb { background-color:var(--reader-scroll-thumb); min-height:32px; }
+body.studio-shell .messages::-webkit-scrollbar-thumb:hover { background-color:var(--reader-scroll-hover); }
 body .chat-area.tts-player-open .messages { padding-top:26px; }
 body .input-box { background:var(--studio-panel) !important; padding:14px 22px max(14px,env(safe-area-inset-bottom)); }
 body .msg-row { width:100%; max-width:none; min-width:0; margin:0; }
@@ -66,6 +70,15 @@ body.studio-shell .input-row textarea::placeholder { white-space:nowrap; }
 .novel-meta { color:var(--text3); font-size:12px; margin-bottom:32px; }
 .novel-body { font-family:"Noto Serif SC","Songti SC","Microsoft YaHei",serif; font-size:var(--reader-size,16px); line-height:1.75; overflow-wrap:anywhere; letter-spacing:.015em; }
 .novel-body p { white-space:pre-wrap; margin:0 0 .75em; }
+.studio-reader-area { position:relative; display:flex; flex:1; min-height:0; min-width:0; }
+.studio-reader-area>.messages { min-width:0; min-height:0; }
+.studio-follow-toggle { position:absolute; top:6px; right:14px; z-index:8; display:grid; place-items:center; width:36px; height:36px; padding:0; border:1px solid var(--border); border-radius:50%; background:var(--studio-panel); color:var(--text2); opacity:.5; cursor:pointer; transition:opacity .15s; }
+.studio-follow-toggle[hidden] { display:none; }
+.studio-follow-toggle[aria-pressed="true"] { color:var(--accent2); }
+.studio-follow-toggle:hover,.studio-follow-toggle:focus-visible { opacity:1; }
+.studio-follow-toggle[data-waiting="true"] { border-style:dashed; }
+.studio-follow-toggle[aria-pressed="true"] .follow-off-mark { display:none; }
+::highlight(studio-reading) { background-color:rgba(133,151,231,.14); }
 .novel-body figure { margin:30px 0; }
 .novel-body img { width:100%; max-height:680px; object-fit:contain; border-radius:5px; background:var(--studio-panel); }
 .novel-body figcaption { color:var(--text3); font-size:11px; text-align:center; margin-top:8px; }
@@ -236,6 +249,12 @@ body.studio-shell .conv-count { grid-column:2 / 4; grid-row:2; justify-self:end;
 /* Story and chapter share one fixed header, with a quiet secondary line. */
 body.studio-shell .chat-header { flex-wrap:wrap; row-gap:4px; flex-shrink:0; }
 body.studio-shell .chat-header .title { font-size:22px; line-height:1.35; font-weight:650; }
+.studio-title-group { flex:1; min-width:0; overflow:hidden; }
+.studio-selection-summary { display:flex; align-items:center; gap:5px; min-width:0; color:var(--text2); font-size:11px; line-height:14px; font-weight:400; white-space:nowrap; }
+.studio-selection-summary span { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+#theaterSelectedPersona { flex:0 1 auto; max-width:45%; }
+#theaterSelectedModel { flex:0 1 auto; }
+.studio-selection-summary .selection-dot { flex-shrink:0; color:var(--text3); }
 .studio-reading-header { flex:0 0 100%; min-width:0; display:flex; align-items:center; gap:8px; padding:0 0 2px; }
 .studio-reading-header[hidden] { display:none; }
 .studio-reading-header #novelNumber { flex-shrink:0; color:var(--accent); font-size:12px; white-space:nowrap; }
@@ -249,6 +268,7 @@ body.studio-shell .novel-reader { margin-top:0; }
 .studio-chapter-completion>div { display:flex; flex-wrap:wrap; gap:10px; }
 @media(max-width:700px) {
   body.studio-shell .chat-header .title { font-size:19px; }
+  .studio-selection-summary { font-size:10px; line-height:13px; gap:4px; }
   .studio-reading-header { gap:6px; padding:0 0 1px; }
   .studio-reading-header h1 { font-size:12px; }
   .studio-reading-header #novelNumber,.studio-reading-header #novelMeta { font-size:10px; }

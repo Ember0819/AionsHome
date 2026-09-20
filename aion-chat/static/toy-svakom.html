@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#fff7fa">
+  <title>SAVKOM SL278H · 独立控制</title>
+  <link rel="stylesheet" href="/static/toy-pages.css?v=20260920-compact5">
+</head>
+<body class="toy-page toy-control-page toy-svakom-page">
+  <header class="toy-topbar">
+    <a class="toy-icon-button" href="/toys" data-toy-return aria-label="返回聊天">‹</a>
+    <div>
+      <p class="toy-eyebrow">INDEPENDENT CONTROL</p>
+      <h1>SAVKOM · SL278H</h1>
+    </div>
+    <button class="toy-switch-link" id="toySwitchLink" type="button" data-switch-profile="sosexy">切换玩具</button>
+  </header>
+
+  <main class="toy-shell toy-control-shell">
+    <section class="toy-connection-card" aria-labelledby="svakomConnectionTitle">
+      <div class="toy-device-mark toy-device-mark--svakom" aria-hidden="true">↕</div>
+      <div class="toy-connection-copy">
+        <p class="toy-section-kicker">预计设备 · SL278H</p>
+        <h2 id="svakomConnectionTitle"><span class="toy-status-dot"></span><span id="toyConnectionState">未连接</span></h2>
+        <p id="toyConnectionDetail">将显示实际名称并验证蓝牙协议</p>
+      </div>
+      <button class="toy-primary-button" id="toyConnectButton" type="button">连接</button>
+    </section>
+
+    <p class="toy-control-note">小家内返回聊天或其他页面会保持连接；只有手动断开或切换玩具才会主动断开。设备关机、超出范围或 App 被系统终止仍会断连。</p>
+
+    <section class="toy-live-state" aria-label="当前运行状态">
+      <div><span>主体动作</span><strong id="svakomStretchState">停止</strong></div>
+      <div><span>主体震动</span><strong id="svakomVibrateState">停止</strong></div>
+      <div><span>独立拍打</span><strong id="svakomFlapState">停止</strong></div>
+      <div><span>实验加热</span><strong id="svakomHeatState">关闭</strong></div>
+    </section>
+
+    <section class="toy-panel" aria-labelledby="toyAiTitle">
+      <div class="toy-panel-heading">
+        <div><p class="toy-section-kicker">AI CONTROL</p><h2 id="toyAiTitle">新玩具 · AI 编排</h2></div>
+        <label><input type="checkbox" id="toyAiEnabled" disabled> 允许 AI 控制</label>
+      </div>
+      <p class="toy-control-note" id="toyAiStatus" aria-live="polite">正在读取总开关…</p>
+      <p class="toy-control-note">与工具能力同步。开启即提供说明，不要求蓝牙连接或密语模式；仅连接时执行，离线不补发。关闭停止 AI 编排，手动控制仍可用。点击手动模式会先停止 AI 循环；拖动震动力度只调整当前段，下一段仍按编排执行。</p>
+    </section>
+
+    <section class="toy-panel" aria-labelledby="svakomFlapTitle">
+      <div class="toy-panel-heading">
+        <div><p class="toy-section-kicker">FLAP</p><h2 id="svakomFlapTitle">小部件 · 独立拍打</h2></div>
+        <div class="toy-panel-tools">
+          <label>定时<select data-duration-channel="flap"><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option><option value="0" selected>持续</option></select></label>
+          <button class="toy-channel-stop" type="button" data-svakom-command="FLAP:OFF" disabled>停止拍打</button>
+        </div>
+      </div>
+      <p class="toy-control-note">七档由弱到强。只调整拍打，不停止主体动作、主体震动或加热；定时结束也只停止拍打。</p>
+      <div class="toy-mode-grid" id="svakomFlapModes" aria-live="polite"></div>
+    </section>
+
+    <section class="toy-panel">
+      <div class="toy-panel-heading">
+        <div><p class="toy-section-kicker">RHYTHM</p><h2>主体 · 七种原厂模式</h2></div>
+        <div class="toy-panel-tools">
+          <label>定时<select data-duration-channel="stretch"><option value="0">持续</option><option value="10">10 秒</option><option value="30">30 秒</option><option value="60">1 分钟</option></select></label>
+          <button class="toy-channel-stop" type="button" data-svakom-command="STRETCH:OFF" disabled>停止主体</button>
+        </div>
+      </div>
+      <p class="toy-control-note">使用原厂独立动作，不再发送联动指令。名称沿用参考脚本的节奏描述，非实测频率；实际表现以设备为准。</p>
+      <div class="toy-mode-grid" id="svakomStretchModes" aria-live="polite"></div>
+    </section>
+
+    <section class="toy-panel">
+      <div class="toy-panel-heading">
+        <div><p class="toy-section-kicker">BODY VIBRATION</p><h2>主体震动花样</h2></div>
+        <div class="toy-panel-tools">
+          <label>定时<select data-duration-channel="vibrate"><option value="0">持续</option><option value="10">10 秒</option><option value="30">30 秒</option><option value="60">1 分钟</option></select></label>
+          <button class="toy-channel-stop" type="button" data-svakom-command="VIBRATE:OFF" disabled>停止震动</button>
+        </div>
+      </div>
+      <div class="toy-slider-grid">
+        <label for="toyVibrateLevel">震动力度 <output id="toyVibrateLevelValue">2 / 10</output><input id="toyVibrateLevel" type="range" min="1" max="10" step="1" value="2"><small>原厂 1～10 档，非 Hz；运行时拖动即生效，保留原定时；停止时仅预设</small></label>
+      </div>
+      <div class="toy-mode-grid toy-mode-grid--vibrate" id="svakomVibrateModes" aria-live="polite"></div>
+      <p class="toy-control-note">只控制主体震动；不停止主体动作或小部件拍打。</p>
+    </section>
+
+    <section class="toy-panel toy-heat-panel">
+      <div class="toy-panel-heading">
+        <div><p class="toy-section-kicker">EXPERIMENTAL</p><h2>加热（待实机确认）</h2></div>
+        <div class="toy-panel-tools"><label>定时<select data-duration-channel="heat"><option value="0">持续</option><option value="10">10 秒</option><option value="30">30 秒</option><option value="60">1 分钟</option></select></label></div>
+      </div>
+      <div class="toy-heat-controls" id="svakomHeatControls">
+        <button type="button" data-svakom-command="HEAT:ON" disabled><span aria-hidden="true">♨</span><strong>开启加热</strong><small>温柔升温</small></button>
+        <button type="button" data-svakom-command="HEAT:OFF" disabled><span aria-hidden="true">○</span><strong>关闭加热</strong><small>仅关闭加热</small></button>
+      </div>
+    </section>
+
+    <section class="toy-panel" aria-labelledby="toyTimelineTitle">
+      <div class="toy-panel-heading"><div><p class="toy-section-kicker">TIMELINE</p><h2 id="toyTimelineTitle">分段编排</h2></div><button id="toyAddPhase" class="toy-channel-stop" type="button">＋ 添加一段</button></div>
+      <p class="toy-control-note">每段可同时设置主体动作、主体震动和拍打；“保持不变”不发送该路指令，“停止”只关闭该路。整段结束时全部停止。电脑测试请保持页面前台；手机由新版 App 本地执行。</p>
+      <div id="toyTimelinePhases"></div>
+      <p id="toyTimelineSummary" class="toy-control-note" aria-live="polite"></p>
+      <button id="toyTimelineRun" class="toy-primary-button" type="button" disabled>开始编排</button>
+      <p class="toy-control-note">点击手动模式会取消剩余编排，但其他路当前动作不停止；需要全部结束时请点底部“全部停止”。</p>
+    </section>
+
+    <details class="toy-advanced-panel" id="svakomAdvancedPanel">
+      <summary><span><b>高级测试</b><small>duration · HOLD · SEQ</small></span><i>＋</i></summary>
+      <div class="toy-advanced-content">
+        <label for="svakomCommandInput">完整 TOY 指令</label>
+        <div class="toy-command-row">
+          <input id="svakomCommandInput" type="text" spellcheck="false" autocomplete="off" placeholder="[TOY:STRETCH:1|10]">
+          <button id="svakomCommandRun" type="button" disabled>执行</button>
+        </div>
+        <p id="svakomCommandHint">连接并确认协议后可用</p>
+      </div>
+    </details>
+
+    <details class="toy-log-panel">
+      <summary>连接与操作记录 <span>展开</span></summary>
+      <div class="toy-log" id="toyLog" aria-live="polite"><p>等待连接…</p></div>
+    </details>
+  </main>
+
+  <div class="toy-stop-dock">
+    <button class="toy-stop-button" id="toyStopAllButton" type="button" disabled><span aria-hidden="true">■</span> 全部停止</button>
+  </div>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/toy-navigation.js?v=20260920-compact-return"></script>
+  <script src="/static/toy-svakom-protocol.js?v=20260920-ai-loop1"></script>
+  <script src="/static/toy-svakom-ai.js?v=20260920-state-notice1"></script>
+  <script src="/static/toy-svakom-web-ble.js?v=20260919-rhythm2"></script>
+  <script src="/static/toy-svakom.js?v=20260920-state-notice1"></script>
+</body>
+</html>

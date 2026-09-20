@@ -72,7 +72,7 @@ def extract_memory_search_requests(
     for match in _COMMAND_RE.finditer(text or ""):
         if len(requests) >= MAX_REQUESTS:
             break
-        parts = [part.strip() for part in match.group(1).split("|")]
+        parts = [part.strip() for part in re.split(r"[|｜]", match.group(1))]
         query = _clean_query(parts[0] if parts else "")
         if not query or used_chars + len(query) > MAX_TOTAL_QUERY_CHARS:
             continue
@@ -81,6 +81,7 @@ def extract_memory_search_requests(
         range_text = ""
         include_detail = False
         for option in parts[1:]:
+            option = re.sub(r"\s*[=＝]\s*", "=", option)
             lowered = option.lower()
             if lowered in {"relevant", "latest", "earliest"}:
                 mode = lowered  # type: ignore[assignment]

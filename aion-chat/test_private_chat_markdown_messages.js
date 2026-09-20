@@ -34,12 +34,25 @@ function loadPrivateMessageRenderer() {
     stripWishFulfillmentMarker: value => value,
     withWishFallbackAttachments: message => message.attachments || [],
     worldBook: { user_name: 'Test User', ai_name: 'Primary AI' },
-    window: { ChatroomMarkdown: markdown },
+    window: { ChatroomMarkdown: markdown, SystemNoticeUI: require('./static/system-notice-ui.js') },
   };
   vm.createContext(context);
   vm.runInContext(`${rendererSource}\nthis.renderPrivateMessage = renderPrivateMessageHTML;`, context);
   return context.renderPrivateMessage;
 }
+
+test('old leaked AI toy commands become display-only folded notices, not ordinary chat text', () => {
+  const render = loadPrivateMessageRenderer();
+  const content = '[SVAKOM:LOOP:4,1,2,2,0]查岗正文';
+  const message = {id:'old-toy',role:'assistant',created_at:1,attachments:[],content};
+  const html = render(message);
+  assert.doesNotMatch(html, /SVAKOM:LOOP/);
+  assert.match(html, /<details class="system-notice-details">/);
+  assert.match(html, /查岗正文/);
+  assert.match(html, /SVAKOM:循环:4秒,慢速旋转伸缩/);
+  assert.equal(message.content, content);
+  assert.match(render({...message,role:'user'}), /SVAKOM:LOOP/, 'user discussion of syntax is not a command');
+});
 
 test('private AI markdown renders without a bubble below one identity header', () => {
   const html = loadPrivateMessageRenderer()({

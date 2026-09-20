@@ -710,7 +710,7 @@ async def _save_aion_private_message(
             )
         await db.commit()
     msg_id = f"msg_{int(now * 1000)}_idle"
-    from pat_commands import process_pat_commands
+    from capabilities import process_pat_commands
     content = await process_pat_commands(
         content, source_type="private", source_id=conv_id,
         sender="aion", source_msg_id=msg_id,
@@ -850,7 +850,7 @@ async def _run_web_journey(actor: str, session_id: str):
 
 async def _save_autonomy_chatroom_message(room_id, sender, content, **kwargs):
     """Parse pats in autonomous messages that bypass the normal reply pipeline."""
-    from pat_commands import PAT_COMMAND_PATTERN, process_pat_commands
+    from capabilities import PAT_COMMAND_PATTERN, process_pat_commands
     from routes.chatroom import _save_msg
 
     if PAT_COMMAND_PATTERN.search(content or ""):

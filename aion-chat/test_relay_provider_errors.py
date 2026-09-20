@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from ai_providers import build_multimodal_messages, call_aipro, call_custom_openai
 from routes import chat as chat_routes
+from stream_safety import StreamActivity
 
 
 class FakeStreamResponse:
@@ -63,6 +64,28 @@ def fake_client_factory(response):
 
 
 class RelayProviderErrorPassthroughTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reasoning_reports_progress_before_visible_reply(self):
+        from ai_providers import CLI_STATUS_PREFIX
+
+        response = FakeStreamResponse(lines=[
+            'data: {"choices":[{"delta":{"reasoning_content":"分析"}}]}',
+            'data: {"choices":[{"delta":{"reasoning_content":"上下文"}}]}',
+            'data: {"choices":[{"delta":{"content":"你好"}}]}',
+            'data: [DONE]',
+        ])
+        meta = {}
+        with patch("ai_providers.httpx.AsyncClient", new=fake_client_factory(response)):
+            chunks = [chunk async for chunk in call_custom_openai(
+                [{"role": "user", "content": "你好"}],
+                {"base_url": "https://relay.example/v1", "model": "unit-model"},
+                meta,
+            )]
+
+        self.assertTrue(chunks[0].startswith(CLI_STATUS_PREFIX))
+        self.assertEqual(sum(isinstance(chunk, StreamActivity) for chunk in chunks), 2)
+        self.assertEqual(meta["reasoning_content"], "分析上下文")
+        self.assertEqual(chunks[-1], "你好")
+
     def test_multimodal_messages_ignore_video_when_model_does_not_support_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path = Path(tmpdir) / "clip.mp4"

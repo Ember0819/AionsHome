@@ -3,7 +3,51 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, 'static/theater-studio.js'), 'utf8');
+const follow = require('./static/theater-follow.js');
 function section(start, end) { return source.slice(source.indexOf(start), source.indexOf(end)); }
+
+test('reading cues prefer saved source positions, support old character counts and skip unindexed legacy audio', () => {
+  const player={seq:1,segments:[{chars:320},{chars:360}]};
+  assert.deepEqual(follow.segmentRange(player),{start:320,end:680});
+  player.segments[1]={chars:360,start:342,end:702};
+  assert.equal(follow.segmentRange(player),player.segments[1]);
+  player.seq=2;player.segments.push({chars:310});
+  assert.deepEqual(follow.segmentRange(player),{start:702,end:1012});
+  player.legacy=true;assert.equal(follow.segmentRange(player),null);
+  assert.equal(follow.segmentRange({seq:1,segments:[{chars:0},{chars:300}]}),null);
+});
+
+test('paragraph anchors retain blank lines, Unicode and image-slice source offsets', () => {
+  const text='🌙第一段\n\n  \n第二段\n继续';
+  const html=follow.paragraphs(text,42,s=>s);
+  const matches=[...html.matchAll(/data-source-start="(\d+)" data-source-end="(\d+)">([\s\S]*?)<\/p>/g)];
+  assert.equal(matches.length,2);
+  for(const [,start,end,body] of matches)assert.equal(text.slice(Number(start)-42,Number(end)-42),body);
+  assert.equal(matches[1][3],'第二段\n继续');
+});
+
+test('one audio segment scrolls proportionally through its text and keeps the reading position centered', () => {
+  const reader={scrollTop:0,scrollHeight:5000,clientHeight:600,before(){},addEventListener(){},
+    getBoundingClientRect:()=>({top:100,height:600}),scrollTo({top}){this.scrollTop=top;}};
+  const node={nodeType:3,length:360,isConnected:true};
+  const range={startContainer:node,setStart(){},setEnd(){},getClientRects:()=>[
+    {top:1000-reader.scrollTop,width:200,height:20},
+    {top:1800-reader.scrollTop,width:200,height:20}
+  ]};
+  const state={root:{querySelectorAll:()=>[]},content:'文'.repeat(360),visible:true,currentTime:0,duration:30,
+    player:{id:'audio',seq:0,paused:false,segments:[{chars:360}]}};
+  const c=vm.createContext({module:{exports:{}},NodeFilter:{SHOW_TEXT:4,SHOW_ELEMENT:1},
+    localStorage:{getItem:()=>null},clearTimeout(){},matchMedia:()=>({matches:true}),
+    document:{createElement:()=>({append(){},setAttribute(){},addEventListener(){},dataset:{}}),
+      addEventListener(){},createRange:()=>range,createTreeWalker(){let read=false;return {nextNode(){if(read)return null;read=true;return node;}};}}});
+  vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'static/theater-follow.js'),'utf8'),c);
+  const controller=c.module.exports.mount(reader,()=>state);
+  controller.update();assert.equal(reader.scrollTop,610,'first line starts in the center');
+  state.currentTime=15;controller.update();assert.equal(reader.scrollTop,1010,'half the audio reaches half the text height');
+  state.currentTime=30;controller.update();assert.equal(reader.scrollTop,1410,'last line reaches the center');
+  state.player.paused=true;state.currentTime=5;controller.update();assert.equal(reader.scrollTop,1410,'pause prevents automatic movement');
+  controller.resume();assert(Math.abs(reader.scrollTop-(610+800/6))<1,'explicit seeking uses the requested time while paused');
+});
 
 test('starting a chapter collapses the cleared multiline input, failure keeps the draft',async()=>{
   const input={value:'本章想法\n补充场景\n更多细节',style:{height:'120px'},get scrollHeight(){return this.value?120:42;}};
@@ -24,12 +68,43 @@ test('continuation requires confirmation and cancellation keeps the input withou
   const input={value:'只补充最后一幕'};let calls=0,confirmations=0,accepted=false;
   const current={id:'chapter',content:'已有正文',status:'draft'};
   const c=vm.createContext({planning:()=>false,chapter:()=>current,player:null,
-    confirm:()=>{confirmations++;return accepted;},$:()=>input,
+    confirm:()=>false,confirmAction:async()=>{confirmations++;return accepted;},$:()=>input,
     request:async()=>{calls++;},autoResize(){},refresh:async()=>{}});
   vm.runInContext(section('  async function write(', '  async function editChapter('),c);
   await c.write();assert.equal(confirmations,1);assert.equal(calls,0);assert.equal(input.value,'只补充最后一幕');
   accepted=true;await c.write();assert.equal(confirmations,2);assert.equal(calls,1);assert.equal(input.value,'');
   current.writing=true;await c.write();assert.equal(calls,1);assert.equal(confirmations,2);
+});
+
+test('rewrite waits for the page dialog even when native confirms are suppressed; dismissing preserves the chapter',async()=>{
+  const dialogs=[],calls=[],input={value:'保留这段想法'};
+  const c=vm.createContext({planning:()=>false,chapter:()=>({id:'chapter',content:'旧正文'}),
+    player:{source:'chapter'},confirm:()=>false,escHtml:s=>s,$:()=>input,
+    stopPlayer:()=>calls.push('stop'),request:async(...args)=>calls.push(args),autoResize(){},refresh:async()=>{},
+    document:{body:{append:d=>dialogs.push(d)},createElement:()=>{
+      const d=new EventTarget(),yes={};
+      Object.assign(d,{returnValue:'',setAttribute(){},querySelector:()=>yes,
+        showModal(){this.open=true;},remove(){this.removed=true;},
+        close(value){if(value!==undefined)this.returnValue=value;this.open=false;this.dispatchEvent(new Event('close'));}});
+      return d;
+    }}});
+  vm.runInContext(section('  function confirmAction(', '  function updateReaderComposer('),c);
+  vm.runInContext(section('  async function write(', '  async function editChapter('),c);
+  for(const choice of ['cancel',undefined,'confirm']) {
+    const pending=c.write(true),dialog=dialogs.at(-1);
+    assert.equal(dialog?.open,true,'an in-page confirmation must be visible');
+    assert.equal(calls.length,0,'no rewrite or playback stop before confirmation');
+    if(choice==='confirm')dialog.querySelector('[data-confirm]').onclick();
+    else dialog.close(choice);
+    await pending;
+    assert.equal(dialog.removed,true);
+    if(choice!=='confirm')assert.equal(input.value,'保留这段想法');
+  }
+  assert.equal(calls[0],'stop');
+  assert.equal(calls[1][0],'/chapters/chapter/write');
+  assert.equal(calls[1][2].rewrite,true);
+  assert.equal(calls.length,2);
+  assert.equal(input.value,'');
 });
 
 test('discussion messages use configured names and current persona with separate alignment',()=>{
@@ -85,7 +160,7 @@ test('illustrations save through the parent App bridge or a browser download',as
 test('reader controls follow the visible chapter even when the book has pending discussion', () => {
   const elements=new Map();
   const c=vm.createContext({book:{mode:'novel',phase:'discussion'},chapters:[{}],planningView:false,
-    outlineBusy:false,talkBusy:false,discussion:{status:'idle'},isStreaming:false,
+    outlineBusy:false,talkBusy:false,discussion:{status:'idle'},isStreaming:false,readingFollow:null,
     document:{body:{classList:{toggle(){}}}},novel:()=>true,chapter:()=>({status:'ready'}),
     updateReaderComposer(){},renderDirectory(){},toolbar(){},renderOutlineStatus(){},$:id=>{if(!elements.has(id))elements.set(id,{setAttribute(){}});return elements.get(id);}});
   vm.runInContext(section('  function modeUI()', '  function renderOutlineStatus()'),c);
@@ -165,6 +240,37 @@ test('deleting a playing message or novel stops the shared player without affect
   assert.equal(calls.filter(x=>x==='stop').length,2);
 });
 
+test('native chapter playback failure falls back to the same cached segment and keeps its position',async()=>{
+  const {installAionTtsAudio}=require('./static/native-tts-audio.js');
+  const browserPlayers=[],nativeCalls=[],notices=[];
+  class BrowserAudio {
+    constructor(url){this.src=url;this.currentTime=0;this.duration=60;browserPlayers.push(this);}
+    play(){this.playing=true;return Promise.resolve();}
+    pause(){this.playing=false;}
+  }
+  const root={Audio:BrowserAudio,AionTtsAudio:{
+    prepareAudio(id,url){nativeCalls.push({id,url});return true;},stop(){},pauseAudio(){},resumeAudio(){},seekAudio(){},
+  }};
+  installAionTtsAudio(root);
+  const c=vm.createContext({window:root,Audio:BrowserAudio,audio:null,playbackToken:0,
+    player:{id:'recording',status:'ready',seq:1,at:12,paused:false,segments:[{url:'/zero.mp3'},{url:'/one.mp3'},{url:'/two.mp3'}]},
+    updateProgress(){},saveListen(){},showToast:text=>notices.push(text),request(){throw Error('Playback must not request synthesis');}});
+  vm.runInContext(section('  function releaseAudio()', '  function stopPlayer()')+
+    section('  function playSegment()', '  async function pollAudio()'),c);
+  c.playSegment();
+  assert.equal(nativeCalls.length,1);assert.equal(nativeCalls[0].url,'/one.mp3');
+  root.onAionNativeTtsEvent({playerId:nativeCalls[0].id,type:'error'});
+  assert.equal(browserPlayers.length,1);assert.equal(browserPlayers[0].src,'/one.mp3');
+  browserPlayers[0].onloadedmetadata();assert.equal(browserPlayers[0].currentTime,12);
+  assert.equal(c.player.seq,1);assert.equal(c.player.paused,false);assert.deepEqual(notices,[]);
+  root.onAionNativeTtsEvent({playerId:nativeCalls[0].id,type:'ended'});
+  assert.equal(c.player.seq,1,'late native events must not skip the browser segment');
+  browserPlayers[0].onended();
+  assert.equal(nativeCalls.length,1);assert.equal(browserPlayers[1].src,'/two.mp3');
+  browserPlayers[1].onerror();
+  assert.equal(c.player.paused,true);assert.equal(browserPlayers.length,2);assert.equal(notices.length,1);
+});
+
 test('dialogue replay checks existing recordings without requiring a selected voice',async()=>{
   const calls=[];
   const c=vm.createContext({ttsVoice:'',novel:()=>false,player:null,chapters:[],conversations:[],currentConvId:'story',
@@ -175,6 +281,61 @@ test('dialogue replay checks existing recordings without requiring a selected vo
   await c.speak('tm_old');
   assert.equal(calls[0][0],'/speech/tm_old');assert.equal(calls[0][2].prefer_cached,true);
   assert.equal(calls[1],'play');assert.equal(c.player.id,'legacy_msg');
+  c.novel=()=>true;c.player=null;
+  await c.speak('chapter');
+  assert.equal(calls[2][0],'/speech/chapter');assert.equal(calls[3],'play');
+});
+
+test('chapter without audio only synthesizes after confirmation; cancel keeps current playback',async()=>{
+  const calls=[];let accepted=false,confirmations=0;
+  const previous={id:'previous'};
+  const c=vm.createContext({ttsVoice:'new',novel:()=>true,player:previous,chapters:[],conversations:[],currentConvId:'story',
+    confirm:()=>false,confirmAction:async(title,message)=>{assert.match(message,/本章节没有语音/);confirmations++;return accepted;},
+    request:async(...args)=>{calls.push(args);return args[2].allow_generation
+      ? {id:'new',status:'running',segments:[]} : {needs_confirmation:true};},
+    stopPlayer(){c.player=null;},localStorage:{getItem:()=>null},$:()=>({classList:{add(){}}}),
+    document:{querySelector:()=>({classList:{add(){}}})},pollAudio:async()=>{},showToast(){}});
+  vm.runInContext(section('  async function speak(', '  replayTTS='),c);
+  await c.speak('chapter');
+  assert.equal(confirmations,1);assert.equal(calls.length,1);assert.equal(calls[0][2].allow_generation,false);
+  assert.equal(c.player,previous);
+  accepted=true;await c.speak('chapter');
+  assert.equal(confirmations,2);assert.equal(calls.length,3);assert.equal(calls[2][2].allow_generation,true);
+  assert.equal(c.player.id,'new');
+});
+
+test('first outline confirms in the current story; existing outlines clearly offer a new version',async()=>{
+  for(const existing of [false,true]) {
+    const saved = new Map([['studio_view_story','discussion']]);
+    const calls=[],fields={consensus:'共识',outline:'走向',title:'新版本',chapterTitle:'初遇',plan:'雨夜',min:'5000',max:'8000'};
+    const plan={title:'初遇',plan:'雨夜',min_chars:5000,max_chars:8000};
+    const draft={revision:'draft',consensus:'共识',outline:'走向',settings:{target_chars:6500},plans:[plan]};
+    const chapterPanel={querySelector:selector=>({value:fields[selector.match(/data-field="(.*?)"/)[1]]})};
+    const panel={...chapterPanel,querySelectorAll:selector=>selector==='.outline-plan'?[chapterPanel]:[]};
+    const controls=new Map();
+    const dialog={innerHTML:'',querySelector:selector=>{
+      if(selector.startsWith('[data-outline-page='))return panel;
+      if(!controls.has(selector))controls.set(selector,{});
+      return controls.get(selector);
+    },querySelectorAll:()=>[],showModal(){},close(){}};
+    const c=vm.createContext({book:{id:'story',outline:existing?'旧大纲':'',target_chars:6500},
+      chapters:existing?[{id:'chapter',...plan}]:[],selected:'chapter',outlineDraft:draft,planningView:true,currentConvId:'story',
+      conversations:[{id:'story',title:'原名'}],modes:new Map(),$:()=>dialog,escHtml:s=>s,
+      localStorage:{setItem:(key,value)=>saved.set(key,value)},
+      request:async(path,method,body)=>{calls.push({path,method,body});return method==='PUT'?draft:{conversation:{id:existing?'copy':'story',title:existing?'新版本':'原名'}};},
+      selectConv:async id=>calls.push(id),showToast:message=>calls.push(message)});
+    vm.runInContext(section('  function outlineEditor(', '  function renderPlanningIfVisible('),c);
+    c.outlineEditor(true);
+    assert.match(dialog.innerHTML,existing?/确认并创建新剧场/:/确认并开始写作/);
+    if(!existing)assert.doesNotMatch(dialog.innerHTML,/新剧场名字|重写版|确认后新建剧场/);
+    await controls.get('[data-confirm]').onclick();
+    assert.equal(calls[1].path,'/books/story/confirm-outline');
+    assert.equal(calls[1].body.title,existing?'新版本':'');
+    assert.equal(calls[2],existing?'copy':'story');
+    assert.equal(c.conversations.length,existing?2:1);
+    assert.equal(saved.get('studio_view_'+(existing?'copy':'story')),'reader');
+    assert.match(calls[3],existing?/新剧场已创建/:/大纲已确认/);
+  }
 });
 
 test('copy outline sends the chosen model and opens the new story',async()=>{

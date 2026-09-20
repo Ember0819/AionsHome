@@ -23,7 +23,7 @@ from capabilities import (
     is_capability_enabled,
 )
 from app_supervision_ai import APP_COMMAND_PATTERN
-from pat_commands import PAT_COMMAND_PATTERN
+from capabilities import PAT_COMMAND_PATTERN, pat_history_command
 from activity import get_device_context_for_prompt
 from memory import (
     instant_digest, recall_memories, build_surfacing_memories,
@@ -43,6 +43,7 @@ SELFIE_CMD_PATTERN = re.compile(r'\[SELFIE:\s*([^\]]+)\]')
 DRAW_CMD_PATTERN = re.compile(r'\[DRAW:\s*([^\]]+)\]')
 POI_SEARCH_PATTERN = re.compile(r'\[POI_SEARCH:([^\]]+)\]')
 TOY_CMD_PATTERN = re.compile(r'\[TOY:(\d|STOP)\]')
+from svakom_ai import DISPLAY_PATTERN as SVAKOM_CMD_PATTERN
 PET_CMD_PATTERN = re.compile(r'\[PET:([a-z_\-]+)\]', re.IGNORECASE)
 HOME_CMD_PATTERN = re.compile(r'\[HOME:([^\]]+)\]', re.IGNORECASE)
 BAND_VIBRATE_CMD_PATTERN = re.compile(r'\[BAND_VIBRATE:(single|call)\]', re.IGNORECASE)
@@ -62,7 +63,7 @@ MEMORY_SEARCH_CMD_PATTERN = re.compile(
 _ALL_CMD_PATTERNS = [
     MUSIC_CMD_PATTERN, MOMENT_CMD_PATTERN, MEMORY_CMD_PATTERN, WISH_CMD_PATTERN,
     ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN, SONG_CMD_PATTERN,
-    POI_SEARCH_PATTERN, TOY_CMD_PATTERN, PET_CMD_PATTERN,
+    POI_SEARCH_PATTERN, TOY_CMD_PATTERN, SVAKOM_CMD_PATTERN, PET_CMD_PATTERN,
     HOME_CMD_PATTERN, BAND_VIBRATE_CMD_PATTERN, BAND_NOTE_CMD_PATTERN,
     LUCKIN_CMD_PATTERN, TRANSFER_CMD_PATTERN, PRIVATE_WHISPER_CMD_PATTERN,
     WECHAT_MESSAGE_PATTERN, WEB_SEARCH_CMD_PATTERN, WEB_EXTRACT_CMD_PATTERN,
@@ -550,6 +551,8 @@ def _is_model_visible_timeline_message(message: dict) -> bool:
     if message.get("sender") != "system":
         return True
     attachments = _parse_timeline_attachments(message.get("attachments", []))
+    if any(isinstance(a, dict) and a.get('type') == 'svakom_command_notice' for a in attachments):
+        return False
     if trip_card(attachments) is not None:
         return True
     explicitly_model_visible = any(
@@ -564,25 +567,7 @@ def _is_model_visible_timeline_message(message: dict) -> bool:
 
 
 def _pat_history_command(message: dict) -> tuple[str, str] | None:
-    """Restore the authored command, independently of the UI's notice text."""
-    for item in _parse_timeline_attachments(message.get("attachments", [])):
-        if not isinstance(item, dict) or item.get("type") != "pat":
-            continue
-        actor, target = item.get("actor"), item.get("target")
-        if actor not in ("user", "aion", "connor") or target not in ("user", "aion", "connor"):
-            return None
-        action, suffix = item.get("action"), item.get("suffix", "")
-        if action is None:
-            # Older rows only stored display text. Use its quoted boundaries,
-            # not today's configured names, which may have changed since then.
-            target_pattern = "自己" if actor == target else r"「[^」]+」"
-            match = re.fullmatch(r"「[^」]+」(.+?)" + target_pattern + r"(.*)",
-                                 str(message.get("content") or ""), re.DOTALL)
-            if not match:
-                return None
-            action, suffix = match.groups()
-        return actor, f"[PAT:{target}|{action}|{suffix}]"
-    return None
+    return pat_history_command(message, _parse_timeline_attachments(message.get("attachments", [])))
 
 
 def _inline_pat_order(message: dict) -> dict | None:

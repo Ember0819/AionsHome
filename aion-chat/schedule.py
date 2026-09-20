@@ -15,7 +15,7 @@ from database import get_db
 from ws import manager
 from band_commands import process_band_vibration, with_band_vibration_attachment
 from hug_pillow_commands import process_hug_pillow_commands
-from pat_commands import process_pat_commands
+from capabilities import process_pat_commands
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories, format_recalled_memories_for_prompt
 from music import search_songs, get_audio_url
@@ -1407,8 +1407,14 @@ async def _process_background_reply_commands(
 ) -> str:
     """Run lightweight shared post-processing for background AI replies."""
     from routes.chat import _hug_pillow_sys_msg, _process_home_commands
+    from svakom_ai import process_commands as process_svakom_commands
 
-    cleaned = await _process_home_commands(full_text)
+    # Always extract, including disabled/revoked replies. Never grant fresh permission here.
+    target_type = "chatroom" if (target or {}).get("type") == "chatroom" else "private"
+    source_id = (target or {}).get("room_id") if target_type == "chatroom" else conv_id
+    scope = {"room_id": source_id} if target_type == "chatroom" else {"conv_id": conv_id}
+    cleaned = await process_svakom_commands(full_text, ai_msg_id, **scope)
+    cleaned = await _process_home_commands(cleaned)
     cleaned = await _process_background_wechat_commands(
         cleaned,
         target=target,
@@ -1416,8 +1422,6 @@ async def _process_background_reply_commands(
         sender=sender,
         ai_msg_id=ai_msg_id,
     )
-    target_type = "chatroom" if (target or {}).get("type") == "chatroom" else "private"
-    source_id = (target or {}).get("room_id") if target_type == "chatroom" else conv_id
     cleaned = await process_pat_commands(
         cleaned, source_type=target_type, source_id=source_id or "",
         sender=sender, source_msg_id=ai_msg_id,

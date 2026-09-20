@@ -237,6 +237,10 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _possible_command_prefix_len(text: str) -> int:
+    # Keep an incomplete memory tag even when whitespace arrives in its own chunk.
+    memory_prefix = re.search(r"[\[［【]\s*([A-Za-z_]*)\s*$", text)
+    if memory_prefix and "MEMORY_SEARCH".startswith(memory_prefix.group(1).upper()):
+        return len(text) - memory_prefix.start()
     memory_probes = tuple(
         f"{opening}{spacing}MEMORY_SEARCH{colon}"
         for opening in ("[", "［", "【")

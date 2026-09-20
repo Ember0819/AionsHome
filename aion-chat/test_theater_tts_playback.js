@@ -5,12 +5,13 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const queueApi = require('./static/theater_tts_queue.js');
+const { installAionTtsAudio } = require('./static/native-tts-audio.js');
 const html = fs.readFileSync(path.join(__dirname, 'static', 'theater.html'), 'utf8');
 const ttsBlock = html
   .split('/* ── TTS 播放 ── */')[1]
   .split('/* ── 角色管理 ── */')[0];
 
-function createPlaybackContext({ fetchImpl } = {}) {
+function createPlaybackContext({ fetchImpl, nativeBridge } = {}) {
   const elements = new Map();
   const makeElement = () => ({
     classList: {
@@ -90,8 +91,9 @@ function createPlaybackContext({ fetchImpl } = {}) {
     },
     fetch: fetchImpl || (async () => ({ ok: false, json: async () => ({ segments: [] }) })),
     showToast() {},
-    window: { TheaterTTSQueue: queueApi },
+    window: { TheaterTTSQueue: queueApi, Audio: FakeAudio, AionTtsAudio: nativeBridge },
   };
+  installAionTtsAudio(context.window);
   vm.createContext(context);
   vm.runInContext(`
     const $ = id => document.getElementById(id);
@@ -114,6 +116,30 @@ function createPlaybackContext({ fetchImpl } = {}) {
   vm.runInContext(ttsBlock, context);
   return { context, FakeAudio };
 }
+
+test('merged theater reading uses native media playback with resume position and progress', () => {
+  const calls = [];
+  let id;
+  const { context, FakeAudio } = createPlaybackContext({ nativeBridge: {
+    prepareAudio(playerId, url) { id = playerId; calls.push(['prepare', url]); return true; },
+    resumeAudio() { calls.push(['resume']); }, pauseAudio() { calls.push(['pause']); },
+    seekAudio(playerId, at) { calls.push(['seek', at]); }, stop() { calls.push(['stop']); },
+  }});
+  context.startMergedPlayback('chapter', '/chapter.mp3', 12);
+  assert.equal(FakeAudio.instances.length, 0);
+  context.window.onAionNativeTtsEvent({playerId: id, type: 'loadedmetadata', duration: 60, currentTime: 0});
+  assert.deepEqual(calls, [['prepare', '/chapter.mp3'], ['seek', 12], ['resume']]);
+  context.window.onAionNativeTtsEvent({playerId: id, type: 'playing'});
+  context.window.onAionNativeTtsEvent({playerId: id, type: 'timeupdate', currentTime: 15});
+  assert.equal(context.document.getElementById('ttsTopSeek').value, 15);
+  context.toggleTopTTS();
+  context.toggleTopTTS();
+  assert.deepEqual(calls.slice(-2), [['pause'], ['resume']]);
+  context.seekTopTTS(25);
+  assert.deepEqual(calls.at(-1), ['seek', 25]);
+  context.stopTTSPlayback();
+  assert.deepEqual(calls.at(-1), ['stop']);
+});
 
 test('playback controller consumes out-of-order arrivals exactly once in sequence', () => {
   const { context, FakeAudio } = createPlaybackContext();

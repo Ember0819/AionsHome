@@ -106,11 +106,71 @@ function testNativeEventsReachEmbeddedChatroom() {
   assert.strictEqual(childPlaying, true);
 }
 
+async function testTheaterPlaybackControls() {
+  const calls = [];
+  const bridge = {
+    play() { return true; }, stop(id) { calls.push(['stop', id]); },
+    prepareAudio(id, url) { calls.push(['prepare', id, url]); return true; },
+    pauseAudio(id) { calls.push(['pause', id]); },
+    resumeAudio(id) { calls.push(['resume', id]); },
+    seekAudio(id, seconds) { calls.push(['seek', id, seconds]); },
+  };
+  const root = createRoot(bridge);
+  installAionTtsAudio(root);
+  const audio = root.createTtsAudio('/chapter.mp3');
+  let updates = 0, ended = 0;
+  audio.onloadedmetadata = () => { audio.currentTime = 12; };
+  audio.ontimeupdate = () => updates++;
+  audio.onended = () => ended++;
+  audio.load();
+  await audio.play();
+  assert.deepStrictEqual(calls, [['prepare', audio.playerId, '/chapter.mp3']]);
+  root.onAionNativeTtsEvent({playerId: audio.playerId, type: 'loadedmetadata', duration: 60, currentTime: 0});
+  assert.deepStrictEqual(calls.slice(-2), [['seek', audio.playerId, 12], ['resume', audio.playerId]]);
+  assert.equal(audio.duration, 60);
+  root.onAionNativeTtsEvent({playerId: audio.playerId, type: 'timeupdate', currentTime: 18});
+  assert.equal(audio.currentTime, 18);
+  assert.equal(updates, 1);
+  audio.pause();
+  await audio.play();
+  assert.deepStrictEqual(calls.slice(-2), [['pause', audio.playerId], ['resume', audio.playerId]]);
+  assert.equal(calls.filter(c => c[0] === 'prepare').length, 1, 'resume must not restart the chapter');
+  root.onAionNativeTtsEvent({playerId: audio.playerId, type: 'ended', currentTime: 60});
+  assert.equal(ended, 1);
+  assert.equal(audio.currentTime, 60);
+  audio.src = '';
+  root.onAionNativeTtsEvent({playerId: audio.playerId, type: 'ended'});
+  assert.equal(ended, 1, 'released chapter must ignore late events');
+}
+
+async function testTheaterPauseDuringLoadingAndFallback() {
+  const calls = [];
+  const root = createRoot({
+    prepareAudio() { return true; }, pauseAudio() {}, seekAudio() {},
+    resumeAudio() { calls.push('resume'); }, stop() { calls.push('stop'); },
+  });
+  installAionTtsAudio(root);
+  const audio = root.createTtsAudio('/chapter.mp3');
+  await audio.play();
+  audio.pause();
+  root.onAionNativeTtsEvent({playerId: audio.playerId, type: 'loadedmetadata', duration: 10});
+  assert.deepStrictEqual(calls, [], 'paused loading must not start speaking');
+  await audio.play();
+  assert.deepStrictEqual(calls, ['resume']);
+  audio.src = '';
+  assert.deepStrictEqual(calls, ['resume', 'stop']);
+  const oldApp = createRoot({play() {}, stop() {}});
+  installAionTtsAudio(oldApp);
+  assert.equal(oldApp.createTtsAudio('/chapter.mp3').kind, 'html');
+}
+
 Promise.resolve()
   .then(testNativePlaybackAndEvents)
   .then(testNativeStopIsScopedToPlayer)
   .then(testBrowserFallback)
   .then(testNativeEventsReachEmbeddedChatroom)
+  .then(testTheaterPlaybackControls)
+  .then(testTheaterPauseDuringLoadingAndFallback)
   .then(() => console.log('native TTS audio adapter tests passed'))
   .catch(error => {
     console.error(error);

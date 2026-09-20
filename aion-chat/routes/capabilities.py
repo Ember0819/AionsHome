@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from capabilities import capabilities_payload, set_capability_enabled
 from proactive_companionship import (
@@ -10,6 +10,38 @@ from ws import manager
 
 
 router = APIRouter()
+
+
+class SvakomStateReport(BaseModel):
+    source: str = Field(min_length=1, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
+    sequence: int = Field(ge=0, strict=True)
+    connected: bool = Field(strict=True)
+    flap: int = Field(ge=0, le=7, strict=True)
+    vibrate: int = Field(ge=0, le=10, strict=True)
+    vibrate_level: int = Field(ge=0, le=10, strict=True)
+
+
+@router.post('/api/svakom-ai/state')
+async def report_svakom_state(body: SvakomStateReport):
+    from svakom_ai import report_state
+    if body.connected and body.vibrate and not body.vibrate_level:
+        raise HTTPException(status_code=422, detail='running vibration requires a level')
+    report_state(body.model_dump())
+    return {'ok': True}
+
+
+@router.get("/api/svakom-ai")
+async def get_svakom_ai():
+    from svakom_ai import state
+    return state()
+
+
+@router.post("/api/svakom-ai/takeover")
+async def takeover_svakom_ai():
+    from svakom_ai import invalidate_permission
+    current = invalidate_permission()
+    await manager.broadcast({'type': 'svakom_revoked', 'data': current})
+    return current
 
 
 class CapabilityToggle(BaseModel):

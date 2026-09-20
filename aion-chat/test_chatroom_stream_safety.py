@@ -1,7 +1,18 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
+from contextlib import ExitStack, asynccontextmanager
+from unittest.mock import MagicMock
+import aiosqlite
+import routes.chatroom as chatroom_routes
 
-from routes.chatroom import _consume_chatroom_realtime_stream, _consume_chatroom_stream
+from routes.chatroom import (
+    _chatroom_reply_failure_text,
+    _consume_chatroom_realtime_stream,
+    _consume_chatroom_stream,
+    _save_chatroom_generation_failure,
+    _save_chatroom_reply_failure,
+)
 
 
 class _Chunks:
@@ -23,6 +34,212 @@ class _Chunks:
 
 
 class ChatroomStreamSafetyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_persisted_failed_reply_can_be_loaded_and_regenerated_by_same_ai(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.executescript("""
+                CREATE TABLE chatroom_rooms (id TEXT, type TEXT, updated_at REAL);
+                CREATE TABLE chatroom_messages (
+                    id TEXT, room_id TEXT, sender TEXT, content TEXT,
+                    attachments TEXT, reasoning_content TEXT, created_at REAL
+                );
+                INSERT INTO chatroom_rooms VALUES ('room', 'group', 0);
+                INSERT INTO chatroom_messages VALUES ('user', 'room', 'user', 'hello', '[]', '', 1);
+            """)
+
+            @asynccontextmanager
+            async def get_db():
+                yield db
+
+            with (
+                patch.object(chatroom_routes, "get_db", get_db),
+                patch.object(chatroom_routes, "broadcast_synced", new=AsyncMock()),
+                patch.object(chatroom_routes, "connor_1v1_on_message"),
+                patch.object(chatroom_routes, "_with_link_previews", new=AsyncMock(side_effect=lambda text, atts: atts)),
+                patch.object(chatroom_routes, "with_band_vibration_attachment", new=AsyncMock(side_effect=lambda msg_id, atts: atts)),
+                patch.object(chatroom_routes, "synthesize_message_tts_later") as synthesize,
+                patch.object(chatroom_routes, "_reply_aion", new=AsyncMock()) as aion,
+                patch.object(chatroom_routes, "_reply_connor", new=AsyncMock()) as connor,
+            ):
+                await _save_chatroom_reply_failure(
+                    "room", "aion", asyncio.Queue(), "idle_timeout",
+                    partial_text="已收到的回复", msg_id="failed",
+                )
+                messages = await chatroom_routes.list_messages("room", limit=50, before=None)
+                self.assertEqual(messages[-1]["sender"], "aion")
+                self.assertIn("已收到的回复", messages[-1]["content"])
+                self.assertEqual(messages[-1]["attachments"][0]["type"], "chatroom_reply_failure")
+                synthesize.assert_not_called()
+                response = await chatroom_routes.regenerate_chatroom_message.__wrapped__(
+                    "failed", chatroom_routes.MsgRegenerate(),
+                )
+                async for _ in response.body_iterator:
+                    pass
+                aion.assert_awaited_once()
+                connor.assert_not_awaited()
+                self.assertEqual(aion.call_args.args[3], "hello")
+                remaining = await chatroom_routes.list_messages("room", limit=50, before=None)
+                self.assertEqual([msg["id"] for msg in remaining], ["user"])
+
+    async def test_provider_error_is_not_a_successful_reply_or_spoken(self):
+        error = '{"error":{"message":"upstream timeout","type":"server_error"}}'
+        async def stream(*args):
+            yield error
+        queue = asyncio.Queue()
+        tts = MagicMock()
+        tts.flush = AsyncMock()
+        save = AsyncMock(return_value={"id": "failure", "sender": "system"})
+        with ExitStack() as stack:
+            for name, value in {
+                "build_aion_group_context": AsyncMock(return_value=([], {})),
+                "_process_voice_attachments": MagicMock(),
+                "stream_ai": stream,
+                "resolve_model_transport_mode": MagicMock(return_value="legacy"),
+                "TTSStreamer": MagicMock(return_value=tts),
+                "_save_msg": save,
+                "_process_chatroom_commands": AsyncMock(return_value=(error, {})),
+                "_extract_and_save_images": AsyncMock(return_value=[]),
+                "_emit_chatroom_debug": AsyncMock(),
+                "_chatroom_debug_payload": MagicMock(return_value={}),
+                "_fire_chatroom_followups": MagicMock(),
+            }.items():
+                stack.enter_context(patch.object(chatroom_routes, name, value))
+            await chatroom_routes._reply_aion("room", [], 30, "hello", "model", queue,
+                                              tts_enabled=True, tts_voice="voice")
+        events = [queue.get_nowait()["type"] for _ in range(queue.qsize())]
+        self.assertIn("aion_failed", events)
+        self.assertNotIn("aion_done", events)
+        self.assertIn("upstream timeout", save.call_args.args[2])
+        self.assertEqual(save.call_args.args[1], "aion")
+        self.assertFalse(save.call_args.kwargs["auto_tts"])
+        tts.feed.assert_not_called()
+
+    async def test_context_failure_reports_reason_without_stopping_other_participant(self):
+        queue = asyncio.Queue()
+        with (
+            patch.object(chatroom_routes, "load_chatroom_config", return_value={"reply_order": "aion"}),
+            patch.object(chatroom_routes, "instant_digest", new=AsyncMock(return_value={})),
+            patch.object(chatroom_routes, "build_aion_group_context", new=AsyncMock(side_effect=RuntimeError("context unavailable"))),
+            patch.object(chatroom_routes, "_save_msg", new=AsyncMock(return_value={"id": "failure"})) as save,
+            patch.object(chatroom_routes, "_load_room_and_messages", new=AsyncMock(return_value=({}, []))),
+            patch.object(chatroom_routes, "_reply_connor", new=AsyncMock()) as other,
+        ):
+            await chatroom_routes._generate_group_replies("room", {}, [], "model", "Codex", queue, 30)
+        self.assertIn("context unavailable", save.call_args.args[2])
+        other.assert_awaited_once()
+
+    async def test_normal_reply_after_failure_still_feeds_tts(self):
+        async def stream(*args):
+            yield "正常回复"
+        queue = asyncio.Queue()
+        tts = MagicMock()
+        tts.flush = AsyncMock()
+        with ExitStack() as stack:
+            for name, value in {
+                "build_aion_group_context": AsyncMock(return_value=([], {})),
+                "_process_voice_attachments": MagicMock(), "stream_ai": stream,
+                "resolve_model_transport_mode": MagicMock(return_value="legacy"),
+                "TTSStreamer": MagicMock(return_value=tts),
+                "_save_msg": AsyncMock(return_value={"id": "normal", "sender": "aion"}),
+                "_process_chatroom_commands": AsyncMock(return_value=("正常回复", {})),
+                "_extract_and_save_images": AsyncMock(return_value=[]),
+                "_emit_chatroom_debug": AsyncMock(),
+                "_chatroom_debug_payload": MagicMock(return_value={}),
+                "_fire_chatroom_followups": MagicMock(),
+            }.items():
+                stack.enter_context(patch.object(chatroom_routes, name, value))
+            await _save_chatroom_reply_failure("room", "aion", queue, "timeout")
+            await chatroom_routes._reply_aion("room", [], 30, "hello", "model", queue,
+                                              tts_enabled=True, tts_voice="voice")
+        tts.feed.assert_called_once_with("正常回复")
+        tts.flush.assert_awaited_once()
+
+    async def test_failure_saves_partial_text_and_reason_under_original_id(self):
+        queue = asyncio.Queue()
+        with patch.object(chatroom_routes, "_save_msg", new=AsyncMock(return_value={"id": "partial"})) as save:
+            await _save_chatroom_reply_failure("room", "aion", queue, "idle_timeout",
+                                              partial_text="已经收到的正文", msg_id="partial")
+        self.assertIn("已经收到的正文", save.call_args.args[2])
+        self.assertEqual(save.call_args.args[1], "aion")
+        self.assertIn("超时", save.call_args.args[2])
+        self.assertEqual(save.call_args.kwargs["msg_id"], "partial")
+        self.assertFalse(save.call_args.kwargs["auto_tts"])
+
+    async def test_failed_safe_fallback_keeps_received_prefix(self):
+        async def stream():
+            yield "已经收到的正文。" * 30
+            raise TimeoutError()
+        outcome = await _consume_chatroom_realtime_stream(stream, asyncio.Queue(),
+            chunk_type="aion_chunk", transport_mode="safe_live")
+        self.assertTrue(outcome.manual_retry_required)
+        self.assertIn("已经收到的正文", outcome.result.committed_text)
+
+    def test_failure_notice_distinguishes_timeout_and_uses_configured_name(self):
+        with patch("routes.chatroom._name_for_identity", return_value="测试角色"):
+            self.assertEqual(
+                _chatroom_reply_failure_text("aion", "request timeout"),
+                "测试角色 本次回复超时，请重试。",
+            )
+            self.assertEqual(
+                _chatroom_reply_failure_text("aion", "connection reset"),
+                "测试角色 本次回复失败：connection reset",
+            )
+
+    async def test_failure_notice_is_persisted_without_tts_and_sent_to_client(self):
+        queue = asyncio.Queue()
+        saved = {
+            "id": "failure-1",
+            "sender": "aion",
+            "content": "测试角色 本次回复超时，请重试。",
+        }
+        with (
+            patch("routes.chatroom._name_for_identity", return_value="测试角色"),
+            patch("routes.chatroom._save_msg", new=AsyncMock(return_value=saved)) as save_msg,
+        ):
+            await _save_chatroom_reply_failure("room-1", "aion", queue, "timeout")
+
+        save_msg.assert_awaited_once()
+        self.assertEqual(save_msg.await_args.args[1], "aion")
+        self.assertFalse(save_msg.await_args.kwargs["auto_tts"])
+        self.assertEqual(save_msg.await_args.kwargs["attachments"][0]["type"], "chatroom_reply_failure")
+        self.assertEqual(
+            await queue.get(),
+            {"type": "aion_failed", "content": saved["content"], "message": saved},
+        )
+
+    async def test_connor_failure_keeps_original_sender_even_without_text(self):
+        with patch.object(chatroom_routes, "_save_msg", new=AsyncMock()) as save:
+            await _save_chatroom_reply_failure("room", "connor", asyncio.Queue(), "empty_response")
+        self.assertEqual(save.call_args.args[1], "connor")
+        self.assertFalse(save.call_args.kwargs["auto_tts"])
+
+    async def test_failed_stream_cancels_tts_and_preserves_received_text(self):
+        async def stream():
+            yield "已经收到的正文。" * 30
+            raise RuntimeError("connection reset")
+
+        tts = MagicMock()
+        tts.feed_async = AsyncMock()
+        tts.has_emitted_audio = True
+        outcome = await _consume_chatroom_realtime_stream(
+            stream, asyncio.Queue(), chunk_type="aion_chunk",
+            transport_mode="safe_live", tts_streamer=tts,
+        )
+        self.assertTrue(outcome.manual_retry_required)
+        self.assertIn("已经收到的正文", outcome.result.committed_text)
+        self.assertTrue(tts.cancel.called)
+
+    async def test_unexpected_generation_failure_is_also_persisted_without_tts(self):
+        queue = asyncio.Queue()
+        saved = {"id": "failure-2", "sender": "system", "content": "本次回复失败，请重试。"}
+        with patch("routes.chatroom._save_msg", new=AsyncMock(return_value=saved)) as save_msg:
+            await _save_chatroom_generation_failure("room-1", queue)
+
+        self.assertFalse(save_msg.await_args.kwargs["auto_tts"])
+        self.assertEqual(
+            await queue.get(),
+            {"type": "error", "content": saved["content"], "message": saved},
+        )
+
     async def test_connor_safe_live_failure_resets_bubble_then_uses_legacy_once(self):
         queue = asyncio.Queue()
         attempts = 0

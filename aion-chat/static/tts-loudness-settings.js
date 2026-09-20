@@ -34,7 +34,7 @@
     input.addEventListener('change', function() {
       try {
         display(bridge.setLoudnessGainDb(display(input.value)));
-        status.textContent = '已保存到本机 · 下一段语音生效';
+        status.textContent = '已保存到本机 · 下一段语音或提示音生效';
       } catch (_) {
         status.textContent = '保存失败，请再试一次。';
       }

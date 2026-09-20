@@ -472,6 +472,7 @@ function crSuppressTTSMsg(msgId) {
 
 function crShouldAcceptTTSMsg(msgId, createdAt, targetClientId) {
   if (!msgId || crSuppressedTTSMsgIds.has(msgId)) return false;
+  if ((crMessagesById[msgId]?.attachments || []).some(att => att.type === 'chatroom_reply_failure')) return false;
   if (targetClientId && targetClientId !== crAmbientClientId) return false;
   const ts = Number(createdAt || 0);
   if (ts && ts < crTtsAcceptAfter) {
@@ -943,6 +944,7 @@ function isNearBottom() {
 }
 
 function scrollToBottom(force = false) {
+  if (messagesEl.querySelector('.ai-text-editing')) return;
   if (force || isNearBottom()) {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
@@ -2589,6 +2591,8 @@ async function crCenterSearchResult(msgId) {
 if (chatSearchForm) chatSearchForm.addEventListener('submit', runChatSearch);
 
 function renderMessages(msgs) {
+  const restoreEditors = window.AIMessageEditor?.preserve(messagesEl);
+  const previousScrollTop = messagesEl.scrollTop;
   crRenderedRoomId = currentRoom?.id || null;
   crMessageRevision++;
   crMessagesById = {};
@@ -2603,11 +2607,14 @@ function renderMessages(msgs) {
   msgs.forEach(m => { if (m.id) crMessagesById[m.id] = m; });
   const displayMessages = crMessagesForDisplay(msgs);
   messagesEl.innerHTML = displayMessages.map((m, index) => msgHTML(m, displayMessages[index + 1])).join('');
+  if (restoreEditors?.()) messagesEl.scrollTop = previousScrollTop;
   crApplySongGenIndicator();
 }
 
 function crMsgMenuHtml(sender, msgId, opts = {}) {
   if (!msgId) return '';
+  const editHtml = sender === 'aion' || sender === 'connor'
+    ? `<button onclick="editChatroomAiMsg('${msgId}');closeMsgMenus()">编辑</button>` : '';
   const actionHtml = opts.deleteOnly || sender === 'system'
     ? ''
     : sender === 'user'
@@ -2617,6 +2624,7 @@ function crMsgMenuHtml(sender, msgId, opts = {}) {
     <div class="msg-menu-wrap">
       <button class="msg-menu-btn" onclick="toggleMsgMenu(event)">\u22ef</button>
       <div class="msg-menu-dropdown">
+        ${editHtml}
         ${actionHtml}
         <button class="danger" onclick="deleteMsg('${msgId}', this)">\u5220\u9664</button>
       </div>
@@ -2647,7 +2655,8 @@ function crMsgSenderLineHtml(sender, name, msgId, msg = null, opts = {}) {
   const timeHtml = msg?.created_at
     ? `<span class="message-time">${esc(timeStr(msg.created_at))}</span>`
     : '';
-  const ttsHtml = opts.tts && sender !== 'user' && msgId
+  const replyFailed = (msg?.attachments || []).some(att => att.type === 'chatroom_reply_failure');
+  const ttsHtml = opts.tts && sender !== 'user' && msgId && !replyFailed
     ? `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}', this)" title="重听语音">🔊</button>`
     : '';
   const memoryHtml = opts.memory && msgId
@@ -2870,6 +2879,9 @@ function msgHTML(m, nextMessage = null) {
   // 系统事件消息（点歌、闹钟等）
   if (sender === 'system') {
     const msgId = m.id || '';
+    if ((m.attachments || []).some(att => att.type === 'chatroom_reply_failure')) {
+      return `<div class="system-event-msg" data-msg-id="${esc(msgId)}" tabindex="0" onclick="this.focus()"><div class="system-notice-text" style="white-space:pre-wrap;user-select:text;-webkit-user-select:text">${esc(m.content || '')}</div>${crMsgMenuHtml('system', msgId)}</div>`;
+    }
     const afterMsgId = crSystemNoticeAfterMsgId(m);
     const beforeMsgId = crSystemNoticeBeforeMsgId(m, nextMessage);
     const afterAttr = afterMsgId ? ` data-after-msg-id="${esc(afterMsgId)}"` : '';
@@ -2888,7 +2900,7 @@ function msgHTML(m, nextMessage = null) {
         )
       : '';
     const contentHtml = pat ? `<span class="pat-text">${esc(m.content || '')}</span>` : snapshotHtml || (window.SystemNoticeUI
-      ? window.SystemNoticeUI.renderSystemNoticeContent(m.content, {escapeHtml: esc})
+      ? window.SystemNoticeUI.renderSystemNoticeContent(m.content, {escapeHtml: esc, attachments: m.attachments})
       : `<span class="system-event-text">${esc(m.content || '')}</span>`);
     return `<div class="system-event-msg${pat ? ' pat-notice' : ''}${loungeStatus ? ' lounge-visit-status-line' : ''}" data-msg-id="${msgId}" tabindex="0" onclick="this.focus()"${afterAttr}${beforeAttr}>
       <div class="system-event-line">
@@ -2904,7 +2916,8 @@ function msgHTML(m, nextMessage = null) {
   const avatar = AVATARS[sender] || AVATARS.user;
   const isUser = sender === 'user';
   const originalRaw = m.content || '';
-  const raw = crStripWishFulfillmentMarker(originalRaw);
+  const inlineToy = !isUser && window.SystemNoticeUI?.splitInlineToyCommands?.(originalRaw);
+  const raw = crStripWishFulfillmentMarker(inlineToy ? inlineToy.content : originalRaw);
   const messageAttachments = crWithWishFallbackAttachments(m);
 
   // 判断是否为纯语音消息（只有语音附件，content 是转写文本或为空）
@@ -2962,6 +2975,7 @@ function msgHTML(m, nextMessage = null) {
           ${toyHtml}
           ${hasWishFulfillmentAtt || hasDateSummaryAtt || hasLoungeReportAtt || isVoiceOnly ? '' : attHtml}
           ${bandVibrationHtml}
+          ${inlineToy?.noticeHtml ? `<div class="system-notice">${inlineToy.noticeHtml}</div>` : ''}
         </div>
       </div>
     </div>`;
@@ -3180,25 +3194,74 @@ async function consumeChatroomSSE(resp) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try { while (true) {
+    let timer;
+    let result;
+    try {
+      result = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('连接等待超时（超过 330 秒未收到进展）')), 330000);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
+    const { done, value } = result;
+    if (done) {
+      if (pendingStreamSender || streamingBubble) {
+        crHandleReplyFailure({ content: '回复连接已结束，但未收到完整回复。已保留收到的内容，可编辑上一条消息重试。' });
+      }
+      break;
+    }
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop();
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue;
-      try {
-        const data = JSON.parse(line.slice(6));
-        if (_crControl.accepts(data, generation)) handleSSE(data);
-      } catch {}
+      let data;
+      try { data = JSON.parse(line.slice(6)); } catch { continue; }
+      if (_crControl.accepts(data, generation)) handleSSE(data);
     }
+  } } catch (error) {
+    if (!generation?.stopped && error.name !== 'AbortError') {
+      crHandleReplyFailure({ content: `本次回复接收失败：${error.message || error}` });
+      // Stop waiting on the broken connection. Editing/resending explicitly
+      // stops the owned backend request before starting a new one.
+      reader.cancel().catch(() => {});
+    }
+    throw error;
   }
+}
+
+function crCanEditMessage() {
+  return !(isSending || isAiChatting) || !!_crControl.active?.replyFailed;
+}
+
+function editChatroomAiMsg(msgId) {
+  closeMsgMenus();
+  const msg = crMessagesById[msgId];
+  if (!msg || !crIsAiSender(msg.sender)) return;
+  if (isSending || isAiChatting) { toast('请等当前回复结束，或先停止回复后再编辑'); return; }
+  const roomId = currentRoom.id;
+  const row = messagesEl.querySelector(`[data-msg-id="${msgId}"]`);
+  window.AIMessageEditor.open(row, row?.querySelector('.msg-content'), msg.content,
+    async content => {
+      if (isSending || isAiChatting) throw new Error('请先等当前回复结束再保存');
+      const result = await api(`/messages/${encodeURIComponent(msgId)}`, {
+        method: 'PUT', body: JSON.stringify({ content }),
+      });
+      return result.message;
+    },
+    updated => {
+      if (currentRoom?.id !== roomId || !crMessagesById[msgId]) return;
+      if (updated) { crMessagesById[msgId] = updated; crMessageRevision++; }
+      const displayMsg = crMessagesForDisplay(Object.values(crMessagesById)).find(m => m.id === msgId) || crMessagesById[msgId];
+      if (row?.isConnected) row.outerHTML = msgHTML(displayMsg);
+    });
 }
 
 function editChatroomMsg(msgId) {
   const msg = crMessagesById[msgId];
-  if (!msg || msg.sender !== 'user' || isSending || isAiChatting) return;
+  if (!msg || msg.sender !== 'user' || !crCanEditMessage()) return;
   const row = document.querySelector(`[data-msg-id="${msgId}"]`);
   const bubble = row?.querySelector('.bubble');
   if (!bubble) return;
@@ -3227,9 +3290,19 @@ function cancelChatroomEdit() {
 async function saveChatroomEdit(msgId) {
   const ta = document.getElementById(`edit_${msgId}`);
   const msg = crMessagesById[msgId];
-  if (!ta || !msg || isSending || isAiChatting) return;
+  if (!ta || ta.disabled || !msg || !crCanEditMessage()) return;
   const content = ta.value.trim();
   if (!content) { toast('内容不能为空'); return; }
+  ta.disabled = true;
+
+  if (_crControl.active || _crControl.retryStop) {
+    await _crControl.stop();
+    if (_crControl.active || _crControl.retryStop) {
+      ta.disabled = false;
+      toast('上一轮还在停止，请稍后再次确认重发');
+      return;
+    }
+  }
 
   const generation = _crControl.begin(currentRoom.id);
   isSending = true;
@@ -3275,7 +3348,14 @@ async function saveChatroomEdit(msgId) {
 
 async function regenerateChatroomMsg(msgId) {
   const msg = crMessagesById[msgId];
-  if (!msg || msg.sender === 'user' || isSending || isAiChatting) return;
+  if (!msg || !crIsAiSender(msg.sender) || !crCanEditMessage()) return;
+  if (_crControl.active || _crControl.retryStop) {
+    await _crControl.stop();
+    if (_crControl.active || _crControl.retryStop) {
+      toast('上一轮还在停止，请稍后再次重新生成');
+      return;
+    }
+  }
   const generation = _crControl.begin(currentRoom.id);
   isSending = true;
   crShowGenerationStop();
@@ -3658,6 +3738,31 @@ composer.addEventListener('submit', async (e) => {
   }
 });
 
+function crHandleReplyFailure(data) {
+  if (_crControl.active) _crControl.active.replyFailed = true;
+  const row = streamingBubble?.closest('.message-row');
+  const streamId = pendingStreamId || row?.id?.replace('streaming-', '');
+  const failedId = data.message?.id || streamId;
+  crSuppressTTSMsg(failedId);
+  crSuppressTTSMsg(streamId);
+  if (_ttsEngine.playOrder.some(id => id === failedId || id === streamId)) crStopTTS();
+  pendingStreamSender = null;
+  pendingStreamId = null;
+  // A persisted failure contains the received prefix and reason, using the
+  // original stream id. Replace the provisional row with that saved content.
+  // If disconnected, keep the local prefix and append a visible local notice.
+  endStreamingBubble(data.message?.id === streamId ? data.message : undefined);
+  messagesEl.querySelectorAll('.typing-indicator').forEach(el => el.remove());
+  if (data.message) {
+    if (!messagesEl.querySelector(`[data-msg-id="${data.message.id}"]`)) appendMessage(data.message);
+  } else {
+    appendMessage({ sender: 'system', content: data.content || '回复失败：连接中断',
+      created_at: Date.now() / 1000, attachments: [{ type: 'chatroom_reply_failure' }] });
+  }
+  toast('本次回复未完成，原因已留在聊天中，可重新生成或删除');
+  crRefocusComposerAfterSend();
+}
+
 function handleSSE(data) {
   switch (data.type) {
     case 'aion_start':
@@ -3713,10 +3818,8 @@ function handleSSE(data) {
       break;
     case 'connor_failed':
     case 'aion_failed':
-      pendingStreamSender = null;
-      pendingStreamId = null;
-      messagesEl.querySelector('.typing-indicator')?.remove();
-      toast(data.content || '回复连接异常，可重试');
+    case 'error':
+      crHandleReplyFailure(data);
       break;
     case 'connor_done':
       pendingStreamSender = null;
@@ -3744,9 +3847,6 @@ function handleSSE(data) {
       break;
     case 'tts_done':
       crFinishTTSForMsg(data.data.msg_id, data.data.created_at, data.data.target_client_id);
-      break;
-    case 'error':
-      toast('错误: ' + data.content);
       break;
     case 'system_msg':
       if (data.message) {
@@ -5449,6 +5549,16 @@ function crOpenDiary() {
   }
 }
 
+function crOpenToyControls() {
+  closeSidebar();
+  if (window.parent !== window && typeof window.parent.openSubPage === 'function') {
+    window.parent.openSubPage('/toys');
+  } else {
+    const returnTo = '/chatroom' + (currentRoom?.id ? '?room=' + encodeURIComponent(currentRoom.id) : '');
+    window.location.href = '/chat?page=%2Ftoys&toyReturn=' + encodeURIComponent(returnTo);
+  }
+}
+
 function renderEmptyChat() {
   roomTitleEl.textContent = '聊天室';
   currentRoom = null;
@@ -5657,7 +5767,7 @@ function connectWS() {
         if (msg.room_id === currentRoom.id) {
           crMessagesById[msg.id] = msg;
           const row = document.querySelector(`[data-msg-id="${msg.id}"]`);
-          if (row) {
+          if (row && !row.classList.contains('ai-text-editing')) {
             const div = document.createElement('div');
             div.innerHTML = msgHTML(msg);
             row.replaceWith(div.firstElementChild);

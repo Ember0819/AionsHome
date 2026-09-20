@@ -97,6 +97,8 @@ def get_key(provider: str) -> str:
         return SETTINGS.get("gemini_free_key", "") or SETTINGS.get("gemini_key", "")
     if provider == "aipro":
         return SETTINGS.get("aipro_key", "")
+    if provider == "minimax":
+        return SETTINGS.get("minimax_tts_key", "")
     return SETTINGS.get("siliconflow_key", "")
 
 def get_sentinel_config() -> dict:

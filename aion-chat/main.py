@@ -54,7 +54,7 @@ from routes import fund as fund_routes
 from routes import wallpaper as wallpaper_routes
 from routes import playground as playground_routes
 from routes import chatroom as chatroom_routes
-from routes import pat as pat_routes
+from capabilities import pat_router
 from routes import doudizhu as doudizhu_routes
 from routes import seeky as seeky_routes
 from routes import wallet as wallet_routes
@@ -286,7 +286,7 @@ app.include_router(fund_routes.router)
 app.include_router(wallpaper_routes.router)
 app.include_router(playground_routes.router)
 app.include_router(chatroom_routes.router)
-app.include_router(pat_routes.router)
+app.include_router(pat_router)
 app.include_router(doudizhu_routes.router)
 app.include_router(seeky_routes.router)
 app.include_router(wallet_routes.router)
@@ -329,6 +329,21 @@ async def home():
 @app.get("/chat")
 async def chat_page():
     return FileResponse(BASE_DIR / "static" / "chat.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/toys")
+@app.get("/whisper")
+async def whisper_page():
+    return FileResponse(BASE_DIR / "static" / "whisper.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/toys/sosexy")
+@app.get("/whisper/sosexy")
+async def sosexy_toy_page():
+    return FileResponse(BASE_DIR / "static" / "toy-sosexy.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/toys/svakom")
+@app.get("/whisper/svakom")
+async def svakom_toy_page():
+    return FileResponse(BASE_DIR / "static" / "toy-svakom.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/album")

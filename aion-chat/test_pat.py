@@ -10,7 +10,7 @@ import aiosqlite
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from routes import pat
+import capabilities as pat
 
 
 class PatTests(unittest.TestCase):
@@ -39,13 +39,13 @@ class PatTests(unittest.TestCase):
         self.broadcast = AsyncMock()
         for replacement in (
             patch.object(pat, 'get_db', get_db),
-            patch.object(pat, 'get_chatroom_names', return_value=('Ithi', 'Aion', 'Connor')),
+            patch('chatroom.get_chatroom_names', return_value=('Ithi', 'Aion', 'Connor')),
             patch.object(pat.manager, 'broadcast', self.broadcast),
         ):
             replacement.start()
             self.addCleanup(replacement.stop)
         app = FastAPI()
-        app.include_router(pat.router)
+        app.include_router(pat.pat_router)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 
@@ -84,7 +84,7 @@ class PatTests(unittest.TestCase):
                 self.assertEqual(self.broadcast.call_args.args[0]['data']['id'], message['id'])
 
     def test_sender_chooses_action_and_current_config_supplies_names(self):
-        with patch.object(pat, 'get_chatroom_names', return_value=('小月', '星星', '小熊')):
+        with patch('chatroom.get_chatroom_names', return_value=('小月', '星星', '小熊')):
             first = self.send(action=' 捏了捏 ', suffix=' 的脸 ').json()
             second = self.send(target='user', action='抱住了', suffix='').json()
         self.assertEqual(first['content'], '「小月」捏了捏「小熊」的脸')
@@ -106,13 +106,13 @@ class PatTests(unittest.TestCase):
         async def exercise():
             queue = asyncio.Queue()
             for actor, target, expected in (
-                ('aion', 'connor', '「Aion」拍了拍「Connor」'),
-                ('connor', 'aion', '「Connor」拍了拍「Aion」'),
-                ('connor', 'user', '「Connor」拍了拍「Ithi」'),
-                ('aion', 'aion', '「Aion」拍了拍自己'),
+                ('aion', '「Connor」', '「Aion」拍了拍「Connor」'),
+                ('connor', '「Aion」', '「Connor」拍了拍「Aion」'),
+                ('connor', '「Ithi」', '「Connor」拍了拍「Ithi」'),
+                ('aion', '自己', '「Aion」拍了拍自己'),
             ):
                 text, _ = await _process_chatroom_commands(
-                    f'好呀。[PAT:{target}|拍了拍|的狗头，并把煎蛋塞回了Ithi嘴里。]',
+                    f'好呀。[PAT:拍了拍{target}的狗头，并把煎蛋塞回了Ithi嘴里。]',
                     'group', actor, 'reply-' + actor, queue,
                 )
                 self.assertEqual(text, '好呀。')
@@ -130,11 +130,11 @@ class PatTests(unittest.TestCase):
 
     def test_ai_pat_keeps_its_exact_position_inside_the_reply(self):
         import capabilities
-        from pat_commands import process_pat_commands
+        from capabilities import process_pat_commands
 
         async def exercise():
             return await process_pat_commands(
-                '至于始作俑者——[PAT:user|捏住了|的脸，警告：“不许再加粒。”][心里嘀咕：她还笑得这么开心。]',
+                '至于始作俑者——[PAT:捏了捏「Ithi」的怪兽爪子：“软乎乎的。”][心里嘀咕：她还笑得这么开心。]',
                 source_type='chatroom', source_id='group', sender='connor',
                 source_msg_id='reply-inline',
             )
@@ -142,7 +142,9 @@ class PatTests(unittest.TestCase):
         with patch.dict(capabilities.SETTINGS, {capabilities.CAPABILITY_SETTINGS_KEY: {'pat': True}}):
             cleaned = asyncio.run(exercise())
         self.assertEqual(cleaned, '至于始作俑者——[心里嘀咕：她还笑得这么开心。]')
+        self.assertEqual(self.broadcast.await_count, 1, '自然语言拍拍应保存并推送')
         message = self.broadcast.call_args.args[0]['data']
+        self.assertEqual(message['content'], '「Connor」捏了捏「Ithi」的怪兽爪子：“软乎乎的。”')
         order = next(item for item in message['attachments'] if item['type'] == 'system_notice_order')
         self.assertEqual(order, {
             'type': 'system_notice_order',
@@ -158,7 +160,7 @@ class PatTests(unittest.TestCase):
         import schedule
         from routes import chatroom
 
-        text = '早安。[PAT:user|轻轻掖好|被角，低头吻了吻额头：“睡吧，我的Ithil。早安先替你收着。”]'
+        text = '早安。[PAT:轻轻掖好「Ithi」的被角，低头吻了吻额头：“睡吧，我的Ithil。早安先替你收着。”]'
 
         async def exercise():
             with patch.object(autonomy.manager, 'get_connor_last_active', return_value='companion'), \
@@ -166,7 +168,7 @@ class PatTests(unittest.TestCase):
                 await autonomy._save_private_message('connor', text)
                 self.assertEqual(save.call_args.args[2], '早安。')
                 message = self.broadcast.call_args.args[0]['data']
-                self.assertEqual(message['attachments'][0]['action'], '轻轻掖好')
+                self.assertEqual(message['content'], '「Connor」轻轻掖好「Ithi」的被角，低头吻了吻额头：“睡吧，我的Ithil。早安先替你收着。”')
                 order = next(a for a in message['attachments'] if a['type'] == 'system_notice_order')
                 self.assertEqual(order['after_msg_id'], save.call_args.kwargs['msg_id'])
             self.broadcast.reset_mock()
@@ -180,6 +182,27 @@ class PatTests(unittest.TestCase):
         with patch.dict(capabilities.SETTINGS, {capabilities.CAPABILITY_SETTINGS_KEY: {'pat': True}}):
             asyncio.run(exercise())
 
+    def test_only_first_valid_pat_is_saved_and_history_uses_natural_language(self):
+        from capabilities import process_pat_commands
+        from context_builder import _pat_history_command
+
+        async def exercise():
+            with patch.dict(pat.SETTINGS, {pat.CAPABILITY_SETTINGS_KEY: {'pat': True}}):
+                cleaned = await process_pat_commands(
+                    '好呀。[PAT:  ][PAT:捏了捏「Ithi」的爪子]过来。[PAT:抱住了「Ithi」]',
+                    source_type='chatroom', source_id='group', sender='connor',
+                )
+            self.assertEqual(cleaned, '好呀。过来。')
+            async with pat.get_db() as db:
+                rows = await (await db.execute('SELECT content, attachments FROM chatroom_messages')).fetchall()
+            self.assertEqual(len(rows), 1)
+            content, attachments = rows[0]
+            self.assertEqual(content, '「Connor」捏了捏「Ithi」的爪子')
+            self.assertEqual(_pat_history_command({'content': content, 'attachments': attachments}),
+                             ('connor', '[PAT:捏了捏「Ithi」的爪子]'))
+
+        asyncio.run(exercise())
+
     def test_autonomy_aion_private_pat_is_removed_before_save(self):
         import autonomy
         import capabilities
@@ -190,7 +213,7 @@ class PatTests(unittest.TestCase):
                     patch.object(autonomy, '_latest_conversation', new=AsyncMock(return_value=('private', 'test'))), \
                     patch('routes.files.export_conversation', new_callable=AsyncMock):
                 return await autonomy._save_aion_private_message(
-                    '[PAT:user|揉了揉|的头]', auto_tts=False,
+                    '[PAT:揉了揉「Ithi」的头]', auto_tts=False,
                 )
 
         with patch.dict(capabilities.SETTINGS, {capabilities.CAPABILITY_SETTINGS_KEY: {'pat': True}}):
@@ -220,23 +243,23 @@ class PatTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         content = merged[0]['content']
         self.assertNotIn('[系统事件：', content)
-        self.assertEqual(content, '至于始作俑者——[PAT:user|捏住了|的脸][心里嘀咕：她还笑得这么开心。]')
+        self.assertEqual(content, '至于始作俑者——[PAT:捏住了「Ithi」的脸][心里嘀咕：她还笑得这么开心。]')
 
     def test_disabled_ai_cannot_execute_but_user_can_and_next_context_keeps_pats(self):
         import capabilities
         import context_builder
-        from pat_commands import process_pat_commands
+        from capabilities import process_pat_commands
 
         async def exercise():
             with patch.dict(capabilities.SETTINGS, {capabilities.CAPABILITY_SETTINGS_KEY: {'pat': True}}):
                 await process_pat_commands(
-                    '[PAT:user|揉了揉|的头]', source_type='chatroom',
+                    '[PAT:揉了揉「Ithi」的头]', source_type='chatroom',
                     source_id='group', sender='connor',
                 )
             self.broadcast.reset_mock()
             with patch.dict(capabilities.SETTINGS, {capabilities.CAPABILITY_SETTINGS_KEY: {'pat': False}}):
                 cleaned = await process_pat_commands(
-                    '晚安。[PAT:user|揉了揉|的头]', source_type='chatroom',
+                    '晚安。[PAT:揉了揉「Ithi」的头]', source_type='chatroom',
                     source_id='group', sender='connor',
                 )
                 self.assertEqual(cleaned, '晚安。')
@@ -259,9 +282,10 @@ class PatTests(unittest.TestCase):
                         merged = await context_builder.fetch_merged_timeline(who, 30, conv_id='private', room_id='group')
                         history = context_builder.render_merged_timeline(merged, who)
                     history_text = '\n'.join(item['content'] for item in history)
-                    self.assertIn(f'[PAT:{target}|拍了拍|的脸]', history_text)
+                    expected_target = 'Aion' if target == 'aion' else 'Connor'
+                    self.assertIn(f'[PAT:拍了拍「{expected_target}」的脸]', history_text)
                     self.assertIn('刚刚感觉如何？', history_text)
-                    self.assertIn('[PAT:user|揉了揉|的头]', history_text)
+                    self.assertIn('[PAT:揉了揉「Ithi」的头]', history_text)
         asyncio.run(exercise())
 
     def test_existing_capabilities_api_can_toggle_pat_without_disabling_human_endpoint(self):
@@ -285,13 +309,14 @@ class PatPromptAndStreamTests(unittest.TestCase):
 
         for actor, target, content, fields, expected in (
             ('aion', 'user', '「旧名字」伸手捏了捏「旧用户」刚洗完还水灵灵的脸蛋，凑近仔细端详', {},
-             '[PAT:user|伸手捏了捏|刚洗完还水灵灵的脸蛋，凑近仔细端详]'),
-            ('connor', 'connor', '「旧名字」拍了拍自己', {}, '[PAT:connor|拍了拍|]'),
-            ('aion', 'user', '界面展示文字', {'action': '揉了揉', 'suffix': '的头'}, '[PAT:user|揉了揉|的头]'),
+             '[PAT:伸手捏了捏「旧用户」刚洗完还水灵灵的脸蛋，凑近仔细端详]'),
+            ('connor', 'connor', '「旧名字」拍了拍自己', {}, '[PAT:拍了拍自己]'),
+            ('aion', 'user', '界面展示文字', {'action': '揉了揉', 'suffix': '的头'}, '[PAT:揉了揉「小月」的头]'),
+            ('connor', None, '界面展示文字', {'text': '捏了捏「小月」的爪子'}, '[PAT:捏了捏「小月」的爪子]'),
         ):
             with self.subTest(actor=actor, fields=fields), patch(
                 'context_builder._timeline_display_names', return_value=('小月', '星星', '小熊')
-            ):
+            ), patch('chatroom.get_chatroom_names', return_value=('小月', '星星', '小熊')):
                 history = render_merged_timeline([{
                     'id': 'pat', 'source': 'group', 'sender': 'system', 'content': content,
                     'attachments': [{'type': 'pat', 'actor': actor, 'target': target, **fields},
@@ -303,19 +328,14 @@ class PatPromptAndStreamTests(unittest.TestCase):
 
     def test_capability_switch_removes_only_instruction_and_names_follow_config(self):
         import capabilities
-        from pat_commands import build_pat_ability_text
+        from capabilities import build_pat_ability_text
 
         self.assertEqual(capabilities.get_capability_def('pat').category, 'social')
         for enabled in (True, False):
             with patch.object(capabilities, 'is_capability_enabled', side_effect=lambda key: enabled and key == 'pat'):
                 prompt = '\n'.join(asyncio.run(capabilities.build_capability_prompt_items('小月', who='connor', include_private_whisper=True)))
             self.assertEqual('[PAT:' in prompt, enabled)
-        with patch('chatroom.get_chatroom_names', return_value=('小月', '星星', '小熊')):
-            group = build_pat_ability_text('connor', group=True)
-            private = build_pat_ability_text('connor')
-        self.assertIn('user=小月、aion=星星、connor=小熊', group)
-        self.assertNotIn('aion=', private)
-        self.assertIn('你是小熊', private)
+        self.assertIn('「小月」', build_pat_ability_text('小月'))
 
     def test_protocol_never_leaks_to_streamed_text_tts_or_saved_reply(self):
         from context_builder import strip_tool_commands
@@ -323,7 +343,7 @@ class PatPromptAndStreamTests(unittest.TestCase):
         from web_search import WebCommandStreamFilter
         from tts import split_text_for_tts
 
-        text = '好呀。[PAT:connor|拍了拍|的狗头]过来。'
+        text = '好呀。[PAT:拍了拍「Connor」的狗头]过来。'
         for filter_type in (KnownCommandStreamFilter, WebCommandStreamFilter):
             stream_filter = filter_type()
             visible = ''.join(stream_filter.feed(char) for char in text)

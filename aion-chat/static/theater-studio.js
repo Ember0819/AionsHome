@@ -11,6 +11,7 @@ const Studio = (() => {
   let readerComposerOpen=false;
   let discussionNames={user_name:'用户',ai_name:'AI'};
   let player = null, audio = null, playbackToken = 0, audioPollBusy = false;
+  let readingFollow = null;
   const durations = new Map();
   const statusNames = {planned:'待写',writing:'正在写',draft:'待确认完成',ready:'已完成',interrupted:'可续写'};
   const oldSelect = selectConv, oldRender = renderMessages, oldSend = send;
@@ -87,6 +88,20 @@ const Studio = (() => {
     d.showModal();
   }
 
+  function confirmAction(title, message, label='确认') {
+    // Native confirm() can be suppressed by Safari, including after a speech-cache request.
+    return new Promise(resolve=>{
+      const d=document.createElement('dialog');
+      d.className='studio-dialog';
+      d.setAttribute('aria-label',title);
+      d.innerHTML=`<form method="dialog"><header><h2>${escHtml(title)}</h2><button class="studio-btn quiet" value="cancel" aria-label="关闭">✕</button></header><p>${escHtml(message)}</p><footer><button class="studio-btn" value="cancel" autofocus>取消</button><button type="button" class="studio-btn primary" data-confirm>${escHtml(label)}</button></footer></form>`;
+      d.querySelector('[data-confirm]').onclick=()=>d.close('confirm');
+      d.addEventListener('close',()=>{d.remove();resolve(d.returnValue==='confirm');},{once:true});
+      document.body.append(d);
+      d.showModal();
+    });
+  }
+
   function updateReaderComposer() {
     document.body.classList.toggle('studio-reader-quiet',novel() && !planningView && !!chapter()?.content && !readerComposerOpen);
   }
@@ -125,7 +140,7 @@ const Studio = (() => {
     document.querySelector('.chat-header').insertAdjacentHTML('beforeend','<div class="studio-reading-header" id="studioReadingHeader" aria-label="当前章节" hidden><span id="novelNumber"></span><h1 id="novelTitle"></h1><span id="novelMeta"></span></div>');
     $('sidebar').querySelector('.sidebar-header').insertAdjacentHTML('beforeend','<div class="library-brand" style="text-align:right"><strong>小剧场</strong></div>');
     document.body.insertAdjacentHTML('beforeend','<dialog class="studio-dialog studio-chapters" id="studioChapterDialog"><header><h2>章节目录</h2><button class="studio-btn" onclick="document.getElementById(\'studioChapterDialog\').close()" aria-label="关闭目录">✕</button></header><p id="studioDirectoryTitle" class="field-help"></p><nav class="studio-directory" id="studioDirectory" aria-label="当前小剧场的章节"></nav></dialog>');
-    $('chatTitle').insertAdjacentHTML('afterend', `<div class="studio-header-actions">${button('返回正文','Studio.returnToReader()','studio-return')}<button type="button" class="studio-btn" id="studioChapterPlan" onclick="Studio.editChapter(false)" hidden>章节计划</button>${button('目录','Studio.directory()')}<details id="studioMenu" class="studio-menu"><summary class="studio-btn">菜单</summary><div class="studio-menu-panel"><div class="studio-menu-basics"><label>故事模式 <select class="studio-mode-select" id="studioMode" aria-label="故事模式" onchange="Studio.switchMode(this.value)"><option value="dialogue">对话</option><option value="novel">小说</option></select></label>${button('字号','Studio.readingSettings()')}${button('人物锚点','Studio.anchors()')}${button('模型、角色与音色','Studio.persona()')}</div><div class="studio-toolbar" id="studioToolbar"></div></div></details></div>`);
+    $('studioTitleGroup').insertAdjacentHTML('afterend', `<div class="studio-header-actions">${button('返回正文','Studio.returnToReader()','studio-return')}<button type="button" class="studio-btn" id="studioChapterPlan" onclick="Studio.editChapter(false)" hidden>章节计划</button>${button('目录','Studio.directory()')}<details id="studioMenu" class="studio-menu"><summary class="studio-btn">菜单</summary><div class="studio-menu-panel"><div class="studio-menu-basics"><label>故事模式 <select class="studio-mode-select" id="studioMode" aria-label="故事模式" onchange="Studio.switchMode(this.value)"><option value="dialogue">对话</option><option value="novel">小说</option></select></label>${button('字号','Studio.readingSettings()')}${button('人物锚点','Studio.anchors()')}${button('模型与音色','Studio.modelSettings()')}${button('角色管理','Studio.persona()')}</div><div class="studio-toolbar" id="studioToolbar"></div></div></details></div>`);
     document.querySelector('.chat-header>.config-btn').style.display='none';
     $('studioMenu').addEventListener('click',e=>{if(e.target.closest('button'))$('studioMenu').open=false;});
     document.addEventListener('click',e=>{if(!$('studioMenu').contains(e.target))$('studioMenu').open=false;});
@@ -134,6 +149,17 @@ const Studio = (() => {
     document.body.insertAdjacentHTML('beforeend','<dialog class="studio-dialog" id="studioDialog"></dialog>');
     document.body.insertAdjacentHTML('beforeend','<dialog class="studio-dialog studio-outline-dialog" id="studioOutlineDialog"></dialog>');
     bindReaderGestures();
+    readingFollow = TheaterFollow.mount($('messages'), () => {
+      const c = chapter();
+      const root = novel() ? (!planningView && c ? $('novelBody') : null)
+        : (player?.cid === currentConvId ? document.querySelector(`.msg-row[data-id="${player.source}"] .msg-body-bubble:not(.editing)`) : null);
+      const content = novel() ? c?.content : currentMessages.find(m => m.id === player?.source)?.content;
+      const matching = player?.cid === currentConvId && (!novel() || (player.source === selected && player.revision === c?.revision));
+      const segment = player?.segments[player.seq];
+      return {root, content: content || '', player: matching ? player : null, visible: subPageVisible && !document.hidden,
+        currentTime: audio?.currentTime ?? player?.at ?? 0,
+        duration: Number.isFinite(audio?.duration) && audio.duration > 0 ? audio.duration : durations.get(segment?.url)};
+    });
     document.body.insertAdjacentHTML('beforeend',`<dialog class="studio-dialog studio-image-dialog" id="studioImageDialog"><header><h2>故事插画</h2><button class="studio-btn" onclick="document.getElementById('studioImageDialog').close()" aria-label="关闭插画">✕</button></header><img id="studioFullImage" alt="故事插画原图"><p class="field-help">可长按图片保存；App 内点下方按钮保存到相册。</p><footer><a class="studio-btn" id="studioImageOriginal" target="_blank" rel="noopener">打开原图</a><button class="studio-btn primary" id="studioSaveImage">保存图片</button></footer></dialog>`);
     $('messages').addEventListener('click',e=>{
       const img=e.target.closest('.novel-body figure img');if(img)viewImage(img.src);
@@ -153,11 +179,13 @@ const Studio = (() => {
       const returning = !subPageVisible && visible;
       subPageVisible = !!visible;
       if (returning && !document.hidden) refresh();
+      if (returning) readingFollow.update(true);
     };
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && subPageVisible) {
         refresh();
         if (player?.status === 'running') pollAudio();
+        readingFollow.update(true);
       }
     });
     $('messages').addEventListener('scroll', () => {
@@ -182,6 +210,7 @@ const Studio = (() => {
     $('sendBtn').title=sendLabel;
     $('sendBtn').disabled=novel() ? (outlineBusy || talkBusy || discussion.status==='running' || !!chapter()?.writing) : isStreaming;
     renderDirectory(); toolbar(); renderOutlineStatus();
+    readingFollow?.update();
   }
   function renderOutlineStatus() {
     const el=$('studioOutlineStatus');
@@ -223,7 +252,7 @@ const Studio = (() => {
     if(!discussion.messages.length)html+='<div class="studio-empty"><div class="ornament">❧</div><h2>先一起想象，这个宇宙</h2><p>在下面说说想听什么。他会带着人设和你聊背景、人物与氛围。聊满意了，再点「按讨论生成大纲」。</p></div>';
     for(const m of discussion.messages)html+=discussionMessage(m);
     if(discussion.error)html+=`<p class="studio-notice">${escHtml(discussion.error)}</p>`;
-    if(outlineDraft)html+=`<section class="studio-outline-review"><h2>新的大纲草稿 · 待确认</h2><p class="studio-notice">共 ${outlineDraft.plans.length} 章。确认后创建新剧场，从第一章开始，当前作品保留。</p>${button('查看并编辑完整大纲','Studio.outlineEditor(true)','primary')}</section>`;
+    if(outlineDraft)html+=`<section class="studio-outline-review"><h2>新的大纲草稿 · 待确认</h2><p class="studio-notice">共 ${outlineDraft.plans.length} 章。${chapters.length?'确认后创建新剧场，从第一章开始，当前作品保留。':'确认后在当前剧场开始写作，保留名字和讨论记录。'}</p>${button('查看并编辑完整大纲','Studio.outlineEditor(true)','primary')}</section>`;
     html+='</section>';
     if(el.innerHTML!==html){el.innerHTML=html;if(bottom)el.scrollTop=el.scrollHeight;}
   }
@@ -254,7 +283,7 @@ const Studio = (() => {
     if($('novelCompletion').innerHTML!==completion)$('novelCompletion').innerHTML=completion;
     const images=[...(c.images||[])].sort((a,b)=>a.after-b.after);
     let pos=0, html='';
-    const paras=t=>t.split(/\n\s*\n/).filter(Boolean).map(p=>`<p>${escHtml(p)}</p>`).join('');
+    const paras=t=>TheaterFollow.paragraphs(t,pos,escHtml);
     for (const im of images) {
       html+=paras(c.content.slice(pos, im.after)); pos=im.after;
       if (im.status==='ready') html+=`<figure><img src="${escHtml(im.url)}" loading="lazy" alt="${escHtml(im.prompt)}" tabindex="0" role="button" aria-label="查看并保存故事插画"><figcaption>故事插画 · 点击查看与保存</figcaption></figure>`;
@@ -263,6 +292,7 @@ const Studio = (() => {
     html+=paras(c.content.slice(pos));
     if (!c.content) html='<p class="studio-notice">'+(c.writing?'正在构思这一章，正文会逐渐出现在这里。':'本章尚未开始。你可以先看章节计划，再点下方「开始写」。')+'</p>';
     if ($('novelBody').innerHTML!==html) $('novelBody').innerHTML=html;
+    readingFollow?.update();
   }
 
   function backgroundPoll() {
@@ -311,7 +341,7 @@ const Studio = (() => {
       } else await oldSelect(id);
     } catch(e) {showToast(e.message);}
   };
-  renderMessages = function() { if (novel()) return renderNovel(); oldRender(); };
+  renderMessages = function() { if (novel()) return renderNovel(); oldRender(); readingFollow?.update(); };
   renderConvList = function() {
     oldList();
     document.querySelectorAll('.conv-item').forEach((el,i)=>{
@@ -369,14 +399,14 @@ const Studio = (() => {
     const current=chapters.length && book.outline ? {consensus:book.consensus||'',outline:book.outline,plans:chapters,settings:book} : null;
     const sources=JSON.parse(JSON.stringify({current,draft:outlineDraft}));
     if(!sources.current && !sources.draft){showToast('先讨论故事，再生成大纲草稿');return;}
-    const cid=book.id,d=$('studioOutlineDialog');
+    const cid=book.id,d=$('studioOutlineDialog'),createsCopy=chapters.length>0;
     let active=(preferDraft && sources.draft) || !sources.current ? 'draft':'current',busy=false;
     function content(kind,data) {
       if(!data)return '';
       const lower=data.settings.min_chars||data.settings.target_chars||6500,upper=data.settings.max_chars||data.settings.target_chars||6500;
-      return `<section data-outline-page="${kind}"><p class="field-help">${kind==='draft'?'这是一份待确认草稿。确认后新建剧场，原作品保持不变。':'这是当前作品的大纲。保存只修改计划，不自动重写正文。'}</p>${kind==='draft'?`<label>新剧场名字<input data-field="title" maxlength="200" value="${escHtml((conversations.find(c=>c.id===cid)?.title||'故事')+'（重写版）')}"></label>`:''}<details class="outline-overview" ${kind==='draft' || planningView?'open':''}><summary>全书总览 · 共 ${data.plans.length} 章</summary><label>故事共识<textarea data-field="consensus" required maxlength="30000">${escHtml(data.consensus)}</textarea></label><label>全书走向与结局<textarea data-field="outline" required maxlength="30000">${escHtml(data.outline)}</textarea></label></details><div class="outline-list-heading"><strong>全部章节</strong><button type="button" class="studio-btn quiet" data-expand="${kind}">展开全部</button></div>${data.plans.map((p,i)=>`<details class="outline-plan" data-index="${i}" ${(kind==='current'?p.id===selected:i===0)?'open':''}><summary><span class="outline-chapter-heading"><span>第 ${i+1} 章 ·</span><input data-field="chapterTitle" aria-label="第 ${i+1} 章标题" title="编辑章节标题" maxlength="200" required value="${escHtml(p.title)}"></span><small>${escHtml((p.plan||'').split('\n')[0].slice(0,90))}</small></summary><label>章节详细计划<textarea data-field="plan" required maxlength="20000">${escHtml(p.plan)}</textarea></label><div class="studio-length-range"><label>字数下限<input data-field="min" type="number" min="1000" max="100000" required value="${p.min_chars||lower}"></label><label>字数上限<input data-field="max" type="number" min="1000" max="100000" required value="${p.max_chars||upper}"></label></div></details>`).join('')}</section>`;
+      return `<section data-outline-page="${kind}"><p class="field-help">${kind==='draft'?(createsCopy?'这是一份待确认草稿。确认后新建剧场，原作品保持不变。':'确认后在当前剧场开始写作，保留名字和讨论记录。'):'这是当前作品的大纲。保存只修改计划，不自动重写正文。'}</p>${kind==='draft' && createsCopy?`<label>新剧场名字<input data-field="title" maxlength="200" value="${escHtml((conversations.find(c=>c.id===cid)?.title||'故事')+'（重写版）')}"></label>`:''}<details class="outline-overview" ${kind==='draft' || planningView?'open':''}><summary>全书总览 · 共 ${data.plans.length} 章</summary><label>故事共识<textarea data-field="consensus" required maxlength="30000">${escHtml(data.consensus)}</textarea></label><label>全书走向与结局<textarea data-field="outline" required maxlength="30000">${escHtml(data.outline)}</textarea></label></details><div class="outline-list-heading"><strong>全部章节</strong><button type="button" class="studio-btn quiet" data-expand="${kind}">展开全部</button></div>${data.plans.map((p,i)=>`<details class="outline-plan" data-index="${i}" ${(kind==='current'?p.id===selected:i===0)?'open':''}><summary><span class="outline-chapter-heading"><span>第 ${i+1} 章 ·</span><input data-field="chapterTitle" aria-label="第 ${i+1} 章标题" title="编辑章节标题" maxlength="200" required value="${escHtml(p.title)}"></span><small>${escHtml((p.plan||'').split('\n')[0].slice(0,90))}</small></summary><label>章节详细计划<textarea data-field="plan" required maxlength="20000">${escHtml(p.plan)}</textarea></label><div class="studio-length-range"><label>字数下限<input data-field="min" type="number" min="1000" max="100000" required value="${p.min_chars||lower}"></label><label>字数上限<input data-field="max" type="number" min="1000" max="100000" required value="${p.max_chars||upper}"></label></div></details>`).join('')}</section>`;
     }
-    d.innerHTML=`<header><h2>故事大纲</h2><button type="button" class="studio-btn quiet" data-close aria-label="关闭大纲">✕</button></header><nav class="outline-tabs" aria-label="选择大纲">${sources.current?'<button type="button" class="studio-btn" data-tab="current">当前作品</button>':''}${sources.draft?'<button type="button" class="studio-btn" data-tab="draft">待确认草稿</button>':''}</nav><div class="outline-editor-content">${content('current',sources.current)}${content('draft',sources.draft)}</div><footer><span class="field-help" data-feedback role="status"></span><button type="button" class="studio-btn" data-save>保存修改</button><button type="button" class="studio-btn primary" data-confirm>确认并创建新剧场</button></footer>`;
+    d.innerHTML=`<header><h2>故事大纲</h2><button type="button" class="studio-btn quiet" data-close aria-label="关闭大纲">✕</button></header><nav class="outline-tabs" aria-label="选择大纲">${sources.current?'<button type="button" class="studio-btn" data-tab="current">当前作品</button>':''}${sources.draft?'<button type="button" class="studio-btn" data-tab="draft">待确认草稿</button>':''}</nav><div class="outline-editor-content">${content('current',sources.current)}${content('draft',sources.draft)}</div><footer><span class="field-help" data-feedback role="status"></span><button type="button" class="studio-btn" data-save>保存修改</button><button type="button" class="studio-btn primary" data-confirm>${createsCopy?'确认并创建新剧场':'确认并开始写作'}</button></footer>`;
     const page=()=>d.querySelector(`[data-outline-page="${active}"]`);
     function switchPage(kind) {
       if(busy)return;
@@ -408,7 +438,7 @@ const Studio = (() => {
       if(payload.plans.some(p=>(p.min_chars||data.settings.min_chars||data.settings.target_chars||6500)>(p.max_chars||data.settings.max_chars||data.settings.target_chars||6500))){showToast('章节字数下限不能大于上限');return;}
       busy=true;
       d.querySelectorAll('button,input,textarea').forEach(el=>el.disabled=true);
-      const feedback=d.querySelector('[data-feedback]');feedback.textContent=confirm?'正在保存并创建新剧场…':'正在保存…';
+      const feedback=d.querySelector('[data-feedback]');feedback.textContent=confirm?(createsCopy?'正在保存并创建新剧场…':'正在保存并确认大纲…'):'正在保存…';
       try {
         const result=await request('/books/'+cid+(active==='draft'?'/outline-draft':'/outline-editor'),'PUT',payload);
         if(active==='draft') {
@@ -418,12 +448,13 @@ const Studio = (() => {
           sources.current={consensus:result.book.consensus,outline:result.book.outline,plans:result.chapters,settings:result.book};
         }
         if(confirm) {
-          const result=await request('/books/'+cid+'/confirm-outline','POST',{revision:sources.draft.revision,title:value(panel,'title')});
+          const result=await request('/books/'+cid+'/confirm-outline','POST',{revision:sources.draft.revision,title:createsCopy?value(panel,'title'):''});
           const conv=result.conversation;
           if(!conv)throw Error('后端尚未加载新草稿流程，请重启后端');
           if(!conversations.some(c=>c.id===conv.id))conversations.unshift(conv);
+          localStorage.setItem('studio_view_'+conv.id,'reader');
           modes.set(conv.id,'novel');d.close();await selectConv(conv.id);
-          showToast('新剧场已创建，可以从第一章开始写了');
+          showToast(conv.id===cid?'大纲已确认，可以从第一章开始写了':'新剧场已创建，可以从第一章开始写了');
         } else {
           feedback.textContent='已保存';
           if(currentConvId===cid){await refresh();renderPlanningIfVisible();}
@@ -507,7 +538,7 @@ const Studio = (() => {
       if(!data.outline_draft)throw Error('未收到大纲草稿，请重启后端后重试');
       outlineFeedback={cid,state:'done'};
       if(cid===currentConvId){outlineDraft=data.outline_draft;setPlanningView(true);renderPlanning();outlineEditor(true);}
-      showToast('新大纲草稿已生成，确认后创建新剧场');
+      showToast('大纲草稿已生成，请查看并确认');
     } catch(e) {
       outlineFeedback={cid,state:'error',error:e.message || '请稍后重新点击生成大纲。'};
       throw e;
@@ -537,8 +568,8 @@ const Studio = (() => {
     const c=chapter();
     if (!c) return outline();
     if (c.writing) return;
-    if (!rewrite && c.content && !confirm('确定续写本章吗？模型会接着当前正文继续写。')) return;
-    if (rewrite && !confirm('重写本章？上一版会保留，当前语音合成将停止。')) return;
+    if (!rewrite && c.content && !await confirmAction('续写本章','确定续写本章吗？模型会接着当前正文继续写。','继续写作')) return;
+    if (rewrite && !await confirmAction('重写本章','重写本章？上一版会保留，当前语音合成将停止。','确认重写')) return;
     if (rewrite && player?.source===c.id) stopPlayer();
     await request('/chapters/'+c.id+'/write','POST',{instruction:$('input').value,rewrite});
     $('input').value=''; autoResize($('input')); await refresh();
@@ -602,7 +633,7 @@ const Studio = (() => {
   function time(value) { return TTSQueue.formatTime(value||0); }
   function saveListen() { if (player) localStorage.setItem('studio_listen_'+player.id,JSON.stringify({seq:player.seq,at:audio?.currentTime||player.at||0})); }
   function releaseAudio() { playbackToken++; if (audio) {audio.pause();audio.onended=null;audio.ontimeupdate=null;audio.onerror=null;audio.src='';audio=null;} }
-  function stopPlayer() {saveListen();releaseAudio();player=null;$('studioPlayerLabel').classList.remove('show');$('studioCancelAudio').style.display='none';$('studioRetryAudio').style.display='none';oldStop();}
+  function stopPlayer() {saveListen();releaseAudio();player=null;readingFollow?.update();$('studioPlayerLabel').classList.remove('show');$('studioCancelAudio').style.display='none';$('studioRetryAudio').style.display='none';oldStop();}
   function readySegments() { return player?.segments.filter((s,i,arr)=>arr.slice(0,i+1).every(x=>durations.has(x.url)))||[]; }
   function updateProgress() {
     if (!player) return;
@@ -616,6 +647,7 @@ const Studio = (() => {
     $('studioPlayerLabel').textContent=`正在听：${player.title}${player.status==='failed'?' · 某段合成失败':!audio && !player.paused && player.status!=='ready'?' · 等待后续内容':''} · 点击返回`;
     $('studioCancelAudio').style.display=player.status==='running'?'':'none';
     $('studioRetryAudio').style.display=['failed','stopped'].includes(player.status)?'':'none';
+    readingFollow?.update();
   }
   async function duration(url) {
     if (durations.has(url)) return;
@@ -631,8 +663,9 @@ const Studio = (() => {
     const segment=player.segments[player.seq];
     if (!segment) { updateProgress(); return; }
     const token=++playbackToken, p=player;
-    audio=typeof window.createTtsAudio==='function'?window.createTtsAudio(segment.url):new Audio(segment.url);
+    audio=!p.browserAudio && typeof window.createTtsAudio==='function'?window.createTtsAudio(segment.url):new Audio(segment.url);
     const current=audio;
+    const nativeAudio=!(current instanceof Audio);
     current.onloadedmetadata=()=>{if(token!==playbackToken)return; if(p.at)current.currentTime=Math.min(p.at,Math.max(0,current.duration-.05));};
     current.ontimeupdate=()=>{if(token!==playbackToken)return;updateProgress();saveListen();};
     current.onended=()=>{
@@ -640,8 +673,20 @@ const Studio = (() => {
       if(p.status==='ready'&&p.seq>=p.segments.length)p.paused=true;
       updateProgress();playSegment();
     };
-    current.onerror=()=>{if(token!==playbackToken)return;p.paused=true;releaseAudio();updateProgress();showToast('音频加载失败，点击播放重试');};
-    current.play().catch(()=>{if(token===playbackToken){p.paused=true;updateProgress();}});
+    const failed=()=>{
+      if(token!==playbackToken)return;
+      if(Number.isFinite(current.currentTime) && current.currentTime>0)p.at=current.currentTime;
+      if(nativeAudio) {
+        // Keep the recording and position when Android's MediaPlayer cannot open it.
+        p.browserAudio=true;releaseAudio();playSegment();return;
+      }
+      p.paused=true;releaseAudio();updateProgress();showToast('音频加载失败，点击播放重试');
+    };
+    current.onerror=failed;
+    current.play().catch(()=>{
+      if(token!==playbackToken)return;
+      if(nativeAudio)failed();else {p.paused=true;updateProgress();}
+    });
   }
   async function pollAudio() {
     if (!player || audioPollBusy) return;
@@ -657,8 +702,12 @@ const Studio = (() => {
     finally {audioPollBusy=false;}
   }
   async function speak(key) {
-    if (!ttsVoice && novel()) {showToast('请先在设置里选择音色');return;}
-    const state=await request('/speech/'+key,'POST',{voice:ttsVoice||'',prefer_cached:true});
+    let state=await request('/speech/'+key,'POST',{voice:ttsVoice||'',prefer_cached:true,allow_generation:false});
+    if(state.needs_confirmation) {
+      if(!await confirmAction('开始朗读',novel()?'本章节没有语音，是否开始合成？':'这条内容没有语音，是否开始合成？','开始合成'))return;
+      if(!ttsVoice){showToast('请先在设置里选择音色');return;}
+      state=await request('/speech/'+key,'POST',{voice:ttsVoice,prefer_cached:true,allow_generation:true});
+    }
     if (player?.id===state.id) {
       player.status=state.status;player.segments=state.segments;
       if(player.paused)toggleTopTTS();
@@ -686,6 +735,7 @@ const Studio = (() => {
     let remaining=Number(value), seq=0, ready=readySegments();
     while(seq<ready.length-1&&remaining>=durations.get(ready[seq].url)){remaining-=durations.get(ready[seq].url);seq++;}
     releaseAudio();player.seq=seq;player.at=remaining;saveListen();playSegment();updateProgress();
+    readingFollow?.resume();
   };
 
   async function boot() {
@@ -705,7 +755,8 @@ const Studio = (() => {
     boot,selectChapter,next,readerSize,readingSettings,
     returnToReader(){if(chapters.length)selectChapter(chapter()?.id||chapters[0].id);},
     discussionMode:()=>action(discussionMode),confirmOutline:()=>action(confirmOutline),restoreOutline:()=>action(restoreOutline),
-    persona(){ setTimeout(()=>{ $('configPopup').classList.add('show'); loadTTSVoices(); },0); },
+    modelSettings:openModelSettings,
+    persona:()=>openPersonaModal(),
     directory(){if(!novel())return showToast('小说模式会显示章节目录');renderDirectory();$('studioChapterDialog').showModal();},
     switchMode(mode){action(async()=>{if(!book)return newConversation();book=await request('/books/'+book.id,'PUT',{...book,mode});await selectConv(book.id);});},
     settings:()=>action(settings),anchors:()=>action(manageAnchors),outline:()=>action(outline),write:r=>action(()=>write(r)),
@@ -715,8 +766,8 @@ const Studio = (() => {
     confirm:()=>action(async()=>{await request('/chapters/'+selected+'/confirm','POST');await refresh();}),
     illustrate:()=>action(async()=>{await request('/chapters/'+selected+'/illustrate','POST');await refresh();}),
     cancelAudio:()=>action(async()=>{if(player){await request('/speech/'+player.source+'/stop','POST');await pollAudio();}}),
-    retryAudio:()=>action(async()=>{if(player){await request('/speech/'+player.source,'POST',{voice:player.voice});await pollAudio();}}),
-    returnToPlaying:()=>action(async()=>{if(!player)return;const p=player;await selectConv(p.cid);if(chapters.some(c=>c.id===p.source))selectChapter(p.source);else document.querySelector(`[data-id="${p.source}"]`)?.scrollIntoView();})
+    retryAudio:()=>action(async()=>{const p=player;if(p && await confirmAction('继续合成语音','是否继续合成尚未完成的语音？已有片段会保留。','继续合成') && player===p){await request('/speech/'+p.source,'POST',{voice:p.voice,prefer_cached:false,allow_generation:true});await pollAudio();}}),
+    returnToPlaying:()=>action(async()=>{if(!player)return;const p=player;await selectConv(p.cid);if(chapters.some(c=>c.id===p.source))selectChapter(p.source);else document.querySelector(`[data-id="${p.source}"]`)?.scrollIntoView();readingFollow?.resume();})
   };
 })();
 Studio.boot();

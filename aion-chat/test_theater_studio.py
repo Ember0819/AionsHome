@@ -78,6 +78,37 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             cursor = await db.execute('SELECT COUNT(*) FROM theater_conversations')
             self.assertEqual((await cursor.fetchone())[0],1)
 
+    async def test_rewrite_and_outline_copy_keep_first_chapter_as_generation_target(self):
+        await studio.change('chapter', title='雨夜初遇', plan='在车站第一次相遇，止于交换姓名。',
+                            content='旧版正文标记', summary='旧版摘要标记', status='draft')
+        await studio.save(dict(id='next', kind='chapter', conv_id='book', number=2,
+                               title='翌日重逢', plan='后章专属细节：次日在书店重逢并找回遗失的车票。',
+                               content='', summary='', status='planned'))
+        with patch('ws.manager.broadcast', AsyncMock()):
+            copied = await studio.copy_outline('book', studio.CopyOutlineRequest())
+        copied_first = next(c for c in await studio.rows(copied['id'], 'chapter') if c['number'] == 1)
+        captured = []
+        async def stream(messages, *args, **kwargs):
+            captured.append(messages)
+            yield '雨落在车站前，两人第一次见面。'
+        for key, rewrite in [('chapter', True), (copied_first['id'], False)]:
+            with self.subTest(rewrite=rewrite):
+                with patch.object(studio, 'stream_ai', stream), patch.object(studio, 'summarize', AsyncMock()), \
+                        patch.object(studio, 'illustrate', AsyncMock()):
+                    await studio.start_writing(key, studio.WriteRequest(rewrite=rewrite))
+                    await studio._writing[key]
+                prompt = captured[-1][0]['content']
+                self.assertIn('本次只写第1章《雨夜初遇》', prompt)
+                self.assertIn('尚无已发生剧情', prompt)
+                self.assertIn('从本章计划的第一个场景开始', prompt)
+                self.assertIn('在车站第一次相遇，止于交换姓名。', prompt)
+                self.assertNotIn('旧版正文标记', prompt)
+                self.assertNotIn('旧版摘要标记', prompt)
+                self.assertNotIn('后章专属细节', prompt)
+                self.assertEqual((await studio.load(key))['number'], 1)
+        self.assertEqual((await studio.load('chapter'))['versions'][-1]['content'], '旧版正文标记')
+        self.assertEqual((await studio.load('next'))['content'], '')
+
     async def test_discussion_edit_delete_clear_stale_context(self):
         import theater_planning as p
         doc = await p.discussion('book')
@@ -218,16 +249,15 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             await studio.put_book('book',studio.BookPatch(min_chars=15000,max_chars=5000))
         self.assertEqual(studio.chapter_limits(await studio.load('book')),(5000,15000))
         self.assertEqual(studio.chapter_limits({'target_chars':6000}),(6000,6000))
-        prompt=studio.chapter_constraints(saved,'甲 '*4000,dict(number=2,title='下一幕',plan='后台见面'))
+        prompt=studio.chapter_constraints(saved,'甲 '*4000)
         self.assertIn('1000至11000字',prompt)
-        self.assertIn('不超过500字',prompt)
-        self.assertIn('后台见面',prompt)
+        self.assertIn('写完本章结束节点即停笔',prompt)
         await studio.change('chapter',content='甲'*15000,status='interrupted')
         with self.assertRaises(studio.HTTPException) as error:
             await studio.start_writing('chapter',studio.WriteRequest())
         self.assertIn('字数上限',error.exception.detail)
 
-    async def test_writing_receives_range_and_next_chapter_boundary(self):
+    async def test_writing_receives_range_and_current_chapter_only(self):
         await studio.change('book',min_chars=5000,max_chars=15000)
         await studio.change('chapter',content='旧正文',status='interrupted')
         await studio.save(dict(id='next',kind='chapter',conv_id='book',number=2,title='后台',plan='后台见面',content='',status='planned'))
@@ -240,7 +270,9 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             await studio.write_chapter('chapter','')
         self.assertIn('5000至15000字',prompts[0])
         self.assertIn('4997至14997字',prompts[0])
-        self.assertIn('后台见面',prompts[0])
+        self.assertNotIn('第2章《后台》',prompts[0])
+        self.assertNotIn('后台见面',prompts[0])
+        self.assertIn('本次续写第1章《Test》',prompts[0])
         self.assertEqual((await studio.load('chapter'))['content'],'旧正文继续正文')
 
     async def test_navigation_preserves_phase_and_explicit_resume_keeps_outline(self):
@@ -256,6 +288,38 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         await studio.change('book', phase='discussion', outline='')
         with self.assertRaises(studio.HTTPException):
             await planning.use_current_outline('book')
+
+    async def test_first_outline_confirmation_stays_in_current_story_and_preserves_discussion(self):
+        import theater_planning as planning
+        async with studio.get_db() as db:
+            await db.execute("DELETE FROM theater_studio WHERE kind='chapter'")
+            await db.commit()
+        await studio.change('book', phase='discussion', outline='', consensus='')
+        doc = await planning.discussion('book')
+        doc = await studio.change(doc['id'], messages=[dict(id='u', role='user', content='本次脑洞')])
+        proposal = dict(consensus='新故事共识', outline='相遇到结局', chapters=[
+            dict(title='初遇', plan='雨夜初遇', min_chars=5000, max_chars=8000)])
+        with patch.object(studio, 'generate_text', AsyncMock(return_value=json.dumps(proposal))):
+            result = await planning.make_outline('book')
+        self.assertEqual(await studio.rows('book', 'chapter'), [])
+        body = planning.ConfirmOutline(revision=result['outline_draft']['revision'])
+        with patch('ws.manager.broadcast', AsyncMock()) as broadcast:
+            result = await planning.confirm_outline('book', body)
+            self.assertEqual(result['conversation']['id'], 'book')
+            self.assertEqual(result['conversation']['title'], 'Test')
+            self.assertEqual(await planning.confirm_outline('book', body), result)
+            broadcast.assert_not_awaited()
+        async with studio.get_db() as db:
+            count = await (await db.execute('SELECT COUNT(*) FROM theater_conversations')).fetchone()
+        self.assertEqual(count[0], 1)
+        self.assertEqual(await studio.load(doc['id']), doc)
+        book = await studio.load('book')
+        self.assertEqual((book['phase'], book['premise'], book['outline']), ('writing', '本次脑洞', '相遇到结局'))
+        chapters = await studio.rows('book', 'chapter')
+        self.assertEqual(len(chapters), 1)
+        self.assertEqual((chapters[0]['number'], chapters[0]['min_chars'], chapters[0]['max_chars']), (1, 5000, 8000))
+        self.assertEqual(chapters[0]['content'], '')
+        self.assertIsNone((await studio.get_book('book'))['outline_draft'])
 
     async def test_outline_draft_uses_only_discussion_and_confirm_creates_independent_story(self):
         import theater_planning as planning
@@ -428,6 +492,31 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('不要发送的旧讨论原文', prompts[0])
         self.assertEqual((await studio.load('chapter'))['context_characters']['历史讨论原文'],0)
 
+    async def test_later_chapter_receives_summaries_without_future_plans_or_previous_prose(self):
+        await studio.change('book', outline='全书未来走向标记')
+        await studio.change('chapter', content='前章正文标记', summary='前章摘要标记', status='ready')
+        await studio.save(dict(id='second', kind='chapter', conv_id='book', number=2,
+                               title='重逢', plan='本章计划标记', content='', summary='',
+                               status='planned', revision=1, versions=[]))
+        await studio.save(dict(id='third', kind='chapter', conv_id='book', number=3,
+                               title='后章标题标记', plan='后章计划标记', content='', status='planned'))
+        captured = []
+        async def stream(messages, *args, **kwargs):
+            captured.append(messages)
+            yield '新的正文。'
+        with patch.object(studio, 'stream_ai', stream), patch.object(studio, 'summarize', AsyncMock()), \
+                patch.object(studio, 'illustrate', AsyncMock()):
+            await studio.start_writing('second', studio.WriteRequest(instruction='本次指导标记'))
+            await studio._writing['second']
+        prompt = captured[0][0]['content']
+        for kept in ('温柔细腻', '雨夜初遇', '前章摘要标记', '本章计划标记', '本次指导标记', '本次只写第2章《重逢》'):
+            self.assertIn(kept, prompt)
+        for excluded in ('全书未来走向标记', '后章标题标记', '后章计划标记', '前章正文标记', '尚无已发生剧情'):
+            self.assertNotIn(excluded, prompt)
+        stats = (await studio.load('second'))['context_characters']
+        self.assertEqual((stats['全书大纲'], stats['上一章结尾']), (0, 0))
+        self.assertGreater(stats['前章剧情摘要'], 0)
+
     async def test_persona_reaches_provider_and_missing_persona_blocks_discussion(self):
         import theater_planning as planning
         captured = []
@@ -441,6 +530,56 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(studio.HTTPException):
                 await planning.send_discussion('book',planning.Talk(content='脑洞'))
 
+    async def test_chapter_replay_prefers_complete_original_over_new_voice_partial(self):
+        await studio.change('chapter', content='完整正文', status='ready')
+        root = studio.THEATER_TTS_CACHE_DIR
+        root.mkdir()
+        for aid, voice, status in [('original', 'old', 'ready'), ('partial', 'new', 'stopped')]:
+            (root/f'{aid}_0.mp3').write_bytes(b'recorded')
+            await studio.save(dict(id=aid, kind='audio', conv_id='book', source='chapter', revision=1,
+                                   voice=voice, status=status, offset=4 if status == 'ready' else 1,
+                                   segments=[dict(seq=0, url=f'/audio/{aid}/0')]))
+        await studio.change('chapter', audio='partial')
+        with patch.object(studio, '_request_tts_audio', AsyncMock()) as synth:
+            for voice in ['new', '']:
+                audio = await studio.start_speech('chapter', studio.SpeechRequest(voice=voice))
+                self.assertEqual((audio['id'], audio['voice']), ('original', 'old'))
+            self.assertNotIn('chapter', studio._speech)
+            synth.assert_not_awaited()
+        self.assertEqual((await studio.load('chapter'))['audio'], 'original')
+        (root/'original_0.mp3').unlink()
+        with self.assertRaises(studio.HTTPException) as error:
+            await studio.start_speech('chapter', studio.SpeechRequest(voice='new'))
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertNotIn('chapter', studio._speech)
+
+    async def test_listening_to_partial_recording_does_not_resume_synthesis(self):
+        await studio.change('chapter', content='完整正文', status='ready')
+        root = studio.THEATER_TTS_CACHE_DIR
+        root.mkdir()
+        (root/'partial_0.mp3').write_bytes(b'recorded')
+        await studio.save(dict(id='partial', kind='audio', conv_id='book', source='chapter', revision=1,
+                               voice='old', status='running', offset=1,
+                               segments=[dict(seq=0, url='/audio/partial/0')]))
+        with patch.object(studio, '_request_tts_audio', AsyncMock()) as synth:
+            audio = await studio.start_speech('chapter', studio.SpeechRequest(voice='new'))
+            self.assertEqual((audio['id'], audio['status']), ('partial', 'stopped'))
+            self.assertNotIn('chapter', studio._speech)
+            synth.assert_not_awaited()
+
+    async def test_new_chapter_speech_requires_explicit_confirmation(self):
+        await studio.change('chapter', content='完整正文', status='ready')
+        with patch.object(studio, '_request_tts_audio', AsyncMock(return_value=b'mp3')) as synth:
+            result = await studio.start_speech('chapter', studio.SpeechRequest(voice='test'))
+            self.assertTrue(result['needs_confirmation'])
+            self.assertEqual(await studio.rows('book', 'audio'), [])
+            self.assertNotIn('chapter', studio._speech)
+            synth.assert_not_awaited()
+            audio = await studio.start_speech('chapter', studio.SpeechRequest(voice='test', allow_generation=True))
+            await studio._speech['chapter']
+            self.assertEqual((await studio.load(audio['id']))['status'], 'ready')
+            synth.assert_awaited_once()
+
     async def test_midstream_opt_in_consumes_prefix_and_new_text_exactly_once(self):
         calls=[]
         async def synth(text, voice, **kwargs):
@@ -453,8 +592,8 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.01)
         self.assertEqual(calls, [])
         with patch.object(studio,'_request_tts_audio',synth):
-            a=await studio.start_speech('chapter',studio.SpeechRequest(voice='test'))
-            again=await studio.start_speech('chapter',studio.SpeechRequest(voice='test'))
+            a=await studio.start_speech('chapter',studio.SpeechRequest(voice='test', allow_generation=True, prefer_cached=False))
+            again=await studio.start_speech('chapter',studio.SpeechRequest(voice='test', allow_generation=True, prefer_cached=False))
             self.assertEqual(a['id'],again['id'])
             studio.append_live('chapter',suffix);studio.finish_live('chapter')
             await asyncio.wait_for(studio._speech['chapter'],2)
@@ -463,6 +602,24 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['offset'],len(prefix+suffix))
         self.assertEqual(result['status'],'ready')
         self.assertTrue(all(len(s)<=500 for s in calls))
+        self.assertEqual([(prefix+suffix)[s['start']:s['end']] for s in result['segments']], calls)
+        self.assertEqual([s['end']-s['start'] for s in result['segments']],
+                         [s['chars'] for s in result['segments']])
+
+    async def test_speech_positions_preserve_skipped_markup_and_unicode(self):
+        silent = '<meta>不朗读的内容</meta>\n\n'
+        prose = '🌙一起听故事。'*80
+        await studio.change('chapter', content=silent+prose, status='ready')
+        original_cut = studio._find_cut_position_for_text
+        def cut(text, low, high):
+            return len(silent)-1 if text.startswith(silent) else original_cut(text, low, high)
+        with patch.object(studio, '_find_cut_position_for_text', cut), \
+                patch.object(studio, '_request_tts_audio', AsyncMock(return_value=b'mp3')):
+            audio = await studio.start_speech('chapter', studio.SpeechRequest(voice='test', allow_generation=True))
+            await studio._speech['chapter']
+        segments = (await studio.audio_status(audio['id']))['segments']
+        self.assertEqual(segments[0]['start'], len(silent))
+        self.assertEqual(''.join((silent+prose)[s['start']:s['end']] for s in segments), prose)
 
     async def test_failure_retries_only_unfinished_segment(self):
         text='这一段要认真听。'*130
@@ -472,12 +629,12 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             calls.append(s)
             return None if len(calls)==2 else b'mp3'
         with patch.object(studio,'_request_tts_audio',synth):
-            a=await studio.start_speech('chapter',studio.SpeechRequest(voice='test'))
+            a=await studio.start_speech('chapter',studio.SpeechRequest(voice='test', allow_generation=True, prefer_cached=False))
             await studio._speech['chapter']
             failed=await studio.load(a['id'])
             self.assertEqual(failed['status'],'failed')
             self.assertEqual(len(failed['segments']),1)
-            await studio.start_speech('chapter',studio.SpeechRequest(voice='test'))
+            await studio.start_speech('chapter',studio.SpeechRequest(voice='test', allow_generation=True, prefer_cached=False))
             await studio._speech['chapter']
         self.assertEqual(calls[1],calls[2])
         self.assertEqual(''.join([calls[0]]+calls[2:]),text)
@@ -490,9 +647,9 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             return b'new-edge-audio'
         await studio.change('chapter',content='今晚的故事。'*100,status='ready')
         with patch.object(studio,'_request_tts_audio',synth):
-            old=await studio.start_speech('chapter',studio.SpeechRequest(voice='old'))
+            old=await studio.start_speech('chapter',studio.SpeechRequest(voice='old', allow_generation=True))
             await started.wait()
-            new=await studio.start_speech('chapter',studio.SpeechRequest(voice='edge:zh-CN-XiaoxiaoNeural'))
+            new=await studio.start_speech('chapter',studio.SpeechRequest(voice='edge:zh-CN-XiaoxiaoNeural', prefer_cached=False, allow_generation=True))
             self.assertNotEqual(new['id'],old['id'])
             await studio._speech['chapter']
         self.assertEqual((await studio.load(old['id']))['status'],'stopped')
@@ -506,7 +663,7 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         legacy=studio.THEATER_TTS_CACHE_DIR/'tm_legacy.mp3'
         legacy.write_bytes(b'old-unknown-voice')
         with patch.object(studio,'_request_tts_audio',new=AsyncMock(return_value=b'new-edge-audio')) as synth:
-            audio=await studio.start_speech('tm_legacy',studio.SpeechRequest(voice='edge:zh-CN-XiaoxiaoNeural',prefer_cached=False))
+            audio=await studio.start_speech('tm_legacy',studio.SpeechRequest(voice='edge:zh-CN-XiaoxiaoNeural',prefer_cached=False,allow_generation=True))
             self.assertEqual(audio['segments'],[])
             await studio._speech['tm_legacy']
         synth.assert_awaited_once()
@@ -575,7 +732,7 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
             started.set(); await asyncio.Event().wait()
         studio.begin_live('chapter','book');studio.append_live('chapter','长长的故事。'*100)
         with patch.object(studio,'_request_tts_audio',synth):
-            a=await studio.start_speech('chapter',studio.SpeechRequest(voice='test'))
+            a=await studio.start_speech('chapter',studio.SpeechRequest(voice='test', allow_generation=True, prefer_cached=False))
             await started.wait();await studio.cancel_speech('chapter')
         self.assertEqual((await studio.load(a['id']))['status'],'stopped')
         self.assertEqual((await studio.load(a['id']))['segments'],[])
@@ -681,7 +838,7 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         async def synth(*args,**kwargs):
             started.set();await asyncio.Event().wait()
         with patch.object(studio,'_request_tts_audio',synth):
-            await studio.start_speech('tm_old',studio.SpeechRequest(voice='test'))
+            await studio.start_speech('tm_old',studio.SpeechRequest(voice='test', allow_generation=True, prefer_cached=False))
             await started.wait()
             await studio.cleanup_conversation('book')
         self.assertNotIn('tm_old',studio._speech)

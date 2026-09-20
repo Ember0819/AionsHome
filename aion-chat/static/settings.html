@@ -566,7 +566,7 @@ body[data-theme="light"] .transport-mode-btn.is-active {
       <summary>
         <div class="summary-title">
           <strong>🔊 手机语音响度</strong>
-          <span>调整聊天语音的增强强度，自动记住你的选择</span>
+          <span>统一增强聊天语音、小剧场朗读和摄像头提示音</span>
         </div>
         <span class="summary-chevron">›</span>
       </summary>
@@ -577,8 +577,44 @@ body[data-theme="light"] .transport-mode-btn.is-active {
         </div>
         <input id="ttsLoudnessInput" type="range" min="0" max="30" step="1" value="0" disabled aria-describedby="ttsLoudnessHelp ttsLoudnessStatus">
         <div class="tts-loudness-scale"><span>0 · 原始音量</span><span>30 · 更响</span></div>
-        <p class="hint" id="ttsLoudnessHelp">松手自动保存到当前手机，从下一段语音生效。无需点击“保存全部设置”。</p>
+        <p class="hint" id="ttsLoudnessHelp">松手自动保存到当前手机，从下一段语音或下一次摄像头提示音生效，音量跟随手机媒体音量。无需点击“保存全部设置”。</p>
         <p class="hint" id="ttsLoudnessStatus" role="status">请在手机 App 中调整。</p>
+      </div>
+    </details>
+
+    <details class="settings-card" open>
+      <summary>
+        <div class="summary-title">
+          <strong>🎙 MiniMax 克隆语音</strong>
+          <span>独立订阅 Key 与两个克隆音色，不影响硅基流动和 Edge</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <p class="hint">保存后，MiniMax 会作为第三条语音线路出现在音色列表。聊天和小剧场会分别记住自己选中的音色。</p>
+        <div class="settings-grid">
+          <div class="field full">
+            <label class="form-label" for="minimaxTtsKeyInput">Token Plan 订阅 Key</label>
+            <input class="form-input mono-input" type="password" id="minimaxTtsKeyInput" placeholder="粘贴 MiniMax 订阅 Key（sk-cp…）" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="form-label" for="minimaxTtsModelInput">语音模型</label>
+            <select class="form-input" id="minimaxTtsModelInput">
+              <option value="speech-2.8-hd">Speech 2.8 HD</option>
+              <option value="speech-2.8-turbo">Speech 2.8 Turbo</option>
+              <option value="speech-2.6-hd">Speech 2.6 HD</option>
+              <option value="speech-2.6-turbo">Speech 2.6 Turbo</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="form-label" id="minimaxAionVoiceLabel" for="minimaxAionVoiceInput">AI 的克隆音色 ID</label>
+            <input class="form-input mono-input" type="text" id="minimaxAionVoiceInput" placeholder="粘贴第一个 voice_id" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="form-label" id="minimaxConnorVoiceLabel" for="minimaxConnorVoiceInput">第二 AI 的克隆音色 ID</label>
+            <input class="form-input mono-input" type="text" id="minimaxConnorVoiceInput" placeholder="粘贴第二个 voice_id" autocomplete="off">
+          </div>
+        </div>
       </div>
     </details>
 
@@ -1144,6 +1180,12 @@ function updateSentinelRouteUi() {
   $("imageGenApiKeyInput").value = s.image_gen_api_key || "";
   $("imageGenModelInput").value = s.image_gen_model || "";
   $("sfKeyInput").value = s.siliconflow_key || "";
+  $("minimaxTtsKeyInput").value = s.minimax_tts_key || "";
+  $("minimaxTtsModelInput").value = s.minimax_tts_model || "speech-2.8-hd";
+  $("minimaxAionVoiceInput").value = s.minimax_aion_voice_id || "";
+  $("minimaxConnorVoiceInput").value = s.minimax_connor_voice_id || "";
+  $("minimaxAionVoiceLabel").textContent = (s.minimax_aion_name || "AI") + " 的克隆音色 ID";
+  $("minimaxConnorVoiceLabel").textContent = (s.minimax_connor_name || "第二 AI") + " 的克隆音色 ID";
   $("tavilyApiKeyInput").value = s.tavily_api_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
   $("luckinMcpEnabledInput").checked = !!s.luckin_mcp_enabled;
@@ -1200,6 +1242,10 @@ async function saveSettings() {
     image_gen_api_key: imageConfig.image_gen_api_key,
     image_gen_model: imageConfig.image_gen_model,
     siliconflow_key: $("sfKeyInput").value.trim(),
+    minimax_tts_key: $("minimaxTtsKeyInput").value.trim(),
+    minimax_tts_model: $("minimaxTtsModelInput").value,
+    minimax_aion_voice_id: $("minimaxAionVoiceInput").value.trim(),
+    minimax_connor_voice_id: $("minimaxConnorVoiceInput").value.trim(),
     tavily_api_key: $("tavilyApiKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim(),
     luckin_mcp_enabled: $("luckinMcpEnabledInput").checked,

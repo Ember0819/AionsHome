@@ -1783,7 +1783,7 @@ function privateSystemMessageHTML(m, nextMessage = null) {
       )
     : "";
   const contentHtml = pat ? `<span class="pat-text">${escHtml(m.content || '')}</span>` : snapshotHtml || (window.SystemNoticeUI
-    ? window.SystemNoticeUI.renderSystemNoticeContent(displayContent, {escapeHtml: escHtml})
+    ? window.SystemNoticeUI.renderSystemNoticeContent(displayContent, {escapeHtml: escHtml, attachments: m.attachments})
     : `<span class="system-notice-text">${escHtml(displayContent)}</span>`);
   return `
   <div class="msg-row system${pat ? ' pat-notice' : ''}${loungeStatus ? ' lounge-visit-status-line' : ''}" id="m_${m.id}" data-msg-id="${m.id}" tabindex="0" onclick="this.focus()"${afterAttr}${beforeAttr}>
@@ -1869,7 +1869,7 @@ function renderPrivateMessageHTML(m) {
   const roleLabel = isUser ? (worldBook.user_name || '你') : (worldBook.ai_name || 'AI');
   const time = m.created_at ? fmtTime(m.created_at) : '';
   const starLabel = m.starred ? '取消星标' : '⭐ 星标';
-  const actionsHtml = `${isUser ? `<button onclick="editMsg('${m.id}');closeMsgMenus()">编辑</button>` : `<button onclick="regenerateMsg('${m.id}');closeMsgMenus()">重新生成</button>`}<button onclick="delMsg('${m.id}');closeMsgMenus()">删除</button><button onclick="copyMsg('${m.id}');closeMsgMenus()">复制</button><button onclick="toggleStar('${m.id}');closeMsgMenus()">${starLabel}</button>`;
+  const actionsHtml = `${isUser ? `<button onclick="editMsg('${m.id}');closeMsgMenus()">编辑</button>` : `<button onclick="editAiMsg('${m.id}');closeMsgMenus()">编辑</button><button onclick="regenerateMsg('${m.id}');closeMsgMenus()">重新生成</button>`}<button onclick="delMsg('${m.id}');closeMsgMenus()">删除</button><button onclick="copyMsg('${m.id}');closeMsgMenus()">复制</button><button onclick="toggleStar('${m.id}');closeMsgMenus()">${starLabel}</button>`;
   const starBadge = m.starred ? '<span class="msg-star-badge">✨</span>' : '';
   const dotsLeft = isUser ? `<button class="msg-dots" onclick="event.stopPropagation();toggleMsgMenu('${m.id}')">&#8943;</button>` : '';
   const dotsRight = !isUser ? `<button class="msg-dots" onclick="event.stopPropagation();toggleMsgMenu('${m.id}')">&#8943;</button>` : '';
@@ -1881,7 +1881,8 @@ function renderPrivateMessageHTML(m) {
   const messageAttachments = withWishFallbackAttachments(m);
   const bandVibrationHtml = renderBandVibrationNote(messageAttachments);
   const rawContent = isUser ? (m.content || '') : (m.content || '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
-  const displayContent = stripWishFulfillmentMarker(rawContent).trim();
+  const inlineToy = !isUser && window.SystemNoticeUI?.splitInlineToyCommands?.(rawContent);
+  const displayContent = stripWishFulfillmentMarker(inlineToy ? inlineToy.content : rawContent).trim();
   const hasVoiceAtt = messageAttachments.some(a => typeof a === 'object' && (a.type === 'voice' || a.type === 'video_clip'));
   const hasWishFulfillmentAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'wish_fulfillment');
   const hasStandaloneCard = messageAttachments.some(a => typeof a === 'object' && (a.type === 'date_summary' || a.type === 'lounge_visit_report'));
@@ -1904,6 +1905,7 @@ function renderPrivateMessageHTML(m) {
     contentHtml += renderAttachments(messageAttachments);
   }
   if (isEmptyMessage) contentHtml = `<div class="${isUser ? 'msg-bubble ' : 'private-ai-message-content '}empty-msg-bubble"></div>`;
+  if (inlineToy?.noticeHtml) contentHtml += `<div class="system-notice">${inlineToy.noticeHtml}</div>`;
   const avatarSrc = isUser ? '/public/UserIcon.png' : '/public/AIIcon.png';
   const ttsBtn = !isUser ? `<button class="tts-replay-btn" onclick="replayTTS('${m.id}')" title="重听语音">🔊</button>` : '';
   const roleRow = `<div class="msg-role-row">${dotsLeft}<span class="msg-role-name">${escHtml(roleLabel)}</span><span class="msg-time">${time}</span>${dotsRight}${feedbackHtml}${ttsBtn}${starBadge}<div class="msg-menu" id="menu_${m.id}">${actionsHtml}</div></div>`;
@@ -1930,6 +1932,8 @@ function updatePrivateStreamingMessage(messageId, display) {
 
 function renderMessages() {
   const el = $("messages");
+  const restoreEditors = window.AIMessageEditor?.preserve(el);
+  const previousScrollTop = el.scrollTop;
 
   if (!currentConvId) {
     el.innerHTML = '<div class="empty-state" style="display:flex"><div class="icon">💬</div><div class="hint">选择或创建一个对话开始聊天</div></div>';
@@ -2036,12 +2040,14 @@ function renderMessages() {
   for (const mrMsgId of _memoryRecordMsgIds) {
     _applyMemoryHint(mrMsgId);
   }
-  scrollBottom();
+  if (restoreEditors?.()) el.scrollTop = previousScrollTop;
+  else scrollBottom();
 }
 
 function scrollBottom() {
   if (_suppressScrollBottom) return;
   const el = $("messages");
+  if (el.querySelector('.ai-text-editing')) return;
   requestAnimationFrame(() => el.scrollTop = el.scrollHeight);
 }
 
@@ -2968,7 +2974,7 @@ async function _processSSEStream(res) {
             if (aiFinalAlreadyReceived) continue;
             _stopTypingAnim();
             aiContent = data.type === "replace" ? data.content : aiContent + data.content;
-            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[NEXT_CHAT:[^\]]*\]/gi, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s*<autonomy_state>[\s\S]*$/gi, '').trim();
+            const display = aiContent.replace(/\[SVAKOM:[^\]]*(?:\]|$)/gi, '').replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[NEXT_CHAT:[^\]]*\]/gi, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s*<autonomy_state>[\s\S]*$/gi, '').trim();
             const mi = currentMessages.findIndex(m => m.id === aiMsgId);
             if (mi >= 0) currentMessages[mi].content = display;
             const container = document.getElementById(`m_${aiMsgId}`);
@@ -3020,6 +3026,29 @@ async function _processSSEStream(res) {
 
 // ── 消息操作 ──
 async function delMsg(id) { await api("DELETE", `/api/messages/${id}`); }
+
+function editAiMsg(id) {
+  closeMsgMenus();
+  const msg = currentMessages.find(m => m.id === id);
+  if (!msg || msg.role !== 'assistant') return;
+  if (sending || streamingAiId) { alert('请等当前回复结束，或先停止回复后再编辑'); return; }
+  const convId = currentConvId;
+  const row = document.getElementById(`m_${id}`);
+  window.AIMessageEditor.open(row, row?.querySelector('.private-message-flow'), msg.content,
+    async content => {
+      if (sending || streamingAiId) throw new Error('请先等当前回复结束再保存');
+      const result = await api('PUT', `/api/messages/${encodeURIComponent(id)}`, { content });
+      return result.message;
+    },
+    updated => {
+      if (currentConvId !== convId) return;
+      const index = currentMessages.findIndex(m => m.id === id);
+      if (index < 0) return;
+      if (updated) currentMessages[index] = updated;
+      const displayMsg = messagesForDisplay(currentMessages).find(m => m.id === id) || currentMessages[index];
+      if (row?.isConnected) row.outerHTML = renderPrivateMessageHTML(displayMsg);
+    });
+}
 
 function editMsg(id) {
   closeMsgMenus();
@@ -3132,7 +3161,7 @@ async function saveEdit(id) {
           } else if (data.type === 'chunk' || data.type === 'replace') {
             _stopTypingAnim();
             aiContent = data.type === 'replace' ? data.content : aiContent + data.content;
-            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[NEXT_CHAT:[^\]]*\]/gi, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s*<autonomy_state>[\s\S]*$/gi, '').trim();
+            const display = aiContent.replace(/\[SVAKOM:[^\]]*(?:\]|$)/gi, '').replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[NEXT_CHAT:[^\]]*\]/gi, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s*<autonomy_state>[\s\S]*$/gi, '').trim();
             const mi = currentMessages.findIndex(m => m.id === aiMsgId);
             if (mi >= 0) currentMessages[mi].content = display;
             const container = document.getElementById(`m_${aiMsgId}`);
@@ -3262,7 +3291,7 @@ async function regenerateMsg(aiMsgId) {
           } else if (d.type === "chunk" || d.type === "replace") {
             _stopTypingAnim();
             aiContent = d.type === "replace" ? d.content : aiContent + d.content;
-            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[NEXT_CHAT:[^\]]*\]/gi, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s*<autonomy_state>[\s\S]*$/gi, '').trim();
+            const display = aiContent.replace(/\[SVAKOM:[^\]]*(?:\]|$)/gi, '').replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[NEXT_CHAT:[^\]]*\]/gi, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s*<autonomy_state>[\s\S]*$/gi, '').trim();
             const mi = currentMessages.findIndex(m => m.id === newId);
             if (mi >= 0) currentMessages[mi].content = display;
             updatePrivateStreamingMessage(newId, display);
@@ -4978,11 +5007,37 @@ if (_bleCh) _bleCh.onmessage = function(ev) {
   else toyLog('已断开（来自聊天室）', 'wl-err');
 };
 
+function forwardSvakomNativeCallback(method, ...args) {
+  // Android evaluates callbacks in the top-level /chat shell, not its iframe.
+  let receiver;
+  try {
+    if (window.AionBle?.getProfile?.() === 'sosexy') return false;
+    const frame = persistentSubPageFrames.get('/toys/svakom') || activeSubPageFrame;
+    const child = frame?.contentWindow;
+    if (!child || child.location.origin !== location.origin
+        || child.location.pathname !== '/toys/svakom') return false;
+    receiver = child.toyNativeBle;
+  } catch (error) { return false; }
+  if (typeof receiver?.[method] !== 'function') return false;
+  receiver[method](...args);
+  return true;
+}
 window.toyNativeBle = {
-  onConnected()      { toyConnected = true; toyUpdateUI(); toyLog('已连接 ♡', 'wl-sys'); _bleNotify(true); },
-  onDisconnected()   { toyConnected = false; toyUpdateUI(); toyLog('断开', 'wl-err'); _bleNotify(false); },
-  onError(msg)       { toyLog(msg, 'wl-err'); },
-  onLog(msg)         { toyLog(msg, 'wl-sys'); }
+  onConnected(profile, name) {
+    if (forwardSvakomNativeCallback('onConnected', profile, name)) return;
+    toyConnected = true; toyUpdateUI(); toyLog('已连接 ♡', 'wl-sys'); _bleNotify(true);
+  },
+  onDisconnected() {
+    if (forwardSvakomNativeCallback('onDisconnected')) return;
+    toyConnected = false; toyUpdateUI(); toyLog('断开', 'wl-err'); _bleNotify(false);
+  },
+  onError(msg) {
+    if (!forwardSvakomNativeCallback('onError', msg)) toyLog(msg, 'wl-err');
+  },
+  onLog(msg) {
+    if (!forwardSvakomNativeCallback('onLog', msg)) toyLog(msg, 'wl-sys');
+  },
+  onNativeAction(action) { forwardSvakomNativeCallback('onNativeAction', action); }
 };
 
 const TOY_MOTORS = [
@@ -5553,7 +5608,8 @@ function shouldNavigatePersistentSubPage(frame, url) {
 
 function isPersistentSubPage(url) {
   const path = subPagePath(url);
-  return path === '/' || path === '/chatroom' || path === '/health' || path === '/music-station';
+  return path === '/' || path === '/chatroom' || path === '/health' || path === '/music-station'
+    || path === '/toys/svakom';
 }
 
 function syncHealthRingPageVisibility() {
@@ -5602,7 +5658,7 @@ function getSubPageFrame(url) {
     frame.className = 'sub-page-frame';
     frame.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-forms allow-popups allow-modals');
     if (path === '/theater') frame.sandbox.add('allow-downloads');
-    frame.setAttribute('allow', 'autoplay');
+    frame.setAttribute('allow', path === '/toys/svakom' ? 'autoplay; bluetooth' : 'autoplay');
     frame.dataset.persistentPath = path;
     attachSubPageFrameLoad(frame);
     $('subPageFrames').appendChild(frame);
@@ -5628,7 +5684,35 @@ if (initialDesktopFrame) {
 }
 attachSubPageFrameLoad(transientSubPageFrame);
 
+function rememberToyReturnPage(url) {
+  if (!/^\/(?:toys(?:\/|$)|whisper$)/.test(subPagePath(url))) return;
+  if (currentSubPage && /^\/(?:toys(?:\/|$)|whisper$)/.test(subPagePath(currentSubPage))) return;
+  const startupReturn = !window.__toyReturnPage && new URLSearchParams(location.search).get('toyReturn');
+  window.__toyReturnPage = currentSubPage || startupReturn || '/chat';
+}
+
+function returnFromToyControls() {
+  const requested = window.__toyReturnPage || new URLSearchParams(location.search).get('toyReturn') || '/';
+  let target = '/';
+  try {
+    const url = new URL(requested, location.origin);
+    if (url.origin === location.origin && ['/', '/chat', '/chatroom'].includes(url.pathname)) {
+      target = url.pathname + url.search;
+    }
+  } catch (_) {}
+  // Reuse the retained chat and toy frames; going back must not disconnect BLE.
+  if (subPagePath(target) === '/chat') closeSubPage();
+  else openSubPage(target);
+}
+
+function closeSubPageFromHeader() {
+  if (currentSubPage && /^\/(?:toys(?:\/|$)|whisper$)/.test(subPagePath(currentSubPage))) {
+    returnFromToyControls();
+  } else closeSubPage();
+}
+
 function openSubPage(url) {
+  rememberToyReturnPage(url);
   closeSidebar();
   syncSubPageMode(url);
   const frame = getSubPageFrame(url);
@@ -5693,6 +5777,10 @@ function handleNativeBack() {
       // 在 Home → 弹对话框
       return 'dialog';
     }
+    if (/^\/(?:toys(?:\/|$)|whisper$)/.test(path)) {
+      returnFromToyControls();
+      return 'handled';
+    }
     // 在其他功能页 → 回到 Home
     if (path === '/taobao') {
       try { if (activeSubPageFrame?.contentWindow?.handleTaobaoBack?.()) return 'handled'; } catch(e) {}
@@ -5713,7 +5801,8 @@ window.addEventListener('popstate', function(e) {
     const path = (() => {
       try { return new URL(currentSubPage || '', location.origin).pathname; } catch(e) { return currentSubPage || ''; }
     })();
-    if (path !== '/') navigateToHome();
+    if (/^\/(?:toys(?:\/|$)|whisper$)/.test(path)) returnFromToyControls();
+    else if (path !== '/') navigateToHome();
     else closeSubPage();
   }
 });

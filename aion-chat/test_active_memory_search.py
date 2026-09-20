@@ -20,6 +20,20 @@ from memory import _keyword_match_score
 
 
 class ActiveMemorySearchTest(unittest.TestCase):
+    def test_options_are_optional_with_full_width_punctuation(self):
+        for command in ("[MEMORY_SEARCH:午饭]", "【MEMORY_SEARCH：午饭】", "［MEMORY_SEARCH：午饭|］"):
+            with self.subTest(command=command):
+                clean, requests = extract_memory_search_requests(command)
+                self.assertEqual(clean, "")
+                self.assertEqual(requests, [MemorySearchRequest("午饭")])
+
+    def test_full_width_option_separators_preserve_query_and_filters(self):
+        clean, requests = extract_memory_search_requests(
+            "我查查。【 MEMORY_SEARCH ：午饭｜LATEST｜date ＝ 前天｜detail]"
+        )
+        self.assertEqual(clean, "我查查。")
+        self.assertEqual(requests, [MemorySearchRequest("午饭", "latest", "前天", include_detail=True)])
+
     def test_extracts_multiple_commands_and_limits_queries(self):
         text = (
             "[MEMORY_SEARCH:过敏药|latest|detail]\n"

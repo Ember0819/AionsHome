@@ -3,7 +3,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import tts
 from routes import settings
@@ -74,6 +74,47 @@ class TTSProviderTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(settings.HTTPException):
                 await settings.set_edge_voice_favorite(settings.EdgeVoiceFavorite(voice="speech:paid", favorite=True))
 
+    async def test_minimax_catalog_is_independent_from_siliconflow_and_uses_configured_names(self):
+        configured = {
+            "minimax_aion_voice_id": "AionClone001",
+            "minimax_connor_voice_id": "ConnorClone001",
+            "edge_tts_favorites": ["edge:zh-CN-XiaoxiaoNeural"],
+        }
+        keys = {"minimax": "plan-key", "siliconflow": ""}
+        with patch.object(settings, "SETTINGS", configured), \
+             patch.object(settings, "get_key", side_effect=lambda provider: keys[provider]), \
+             patch("chatroom.get_chatroom_names", return_value=("用户", "配置中的AI", "配置中的伙伴")):
+            result = await settings.tts_voice_list()
+
+        self.assertEqual(
+            [voice["uri"] for voice in result["voices"]],
+            [
+                "minimax:AionClone001",
+                "minimax:ConnorClone001",
+                "edge:zh-CN-XiaoxiaoNeural",
+            ],
+        )
+        self.assertEqual(result["voices"][0]["customName"], "配置中的AI · 克隆音色")
+        self.assertEqual(result["voices"][1]["customName"], "配置中的伙伴 · 克隆音色")
+
+    async def test_minimax_settings_save_without_changing_existing_tts_keys(self):
+        configured = {"siliconflow_key": "keep-silicon", "edge_tts_favorites": ["edge:voice"]}
+        update = settings.SettingsUpdate(
+            minimax_tts_key="sk-cp-plan",
+            minimax_tts_model="speech-2.6-turbo",
+            minimax_aion_voice_id="AionClone001",
+            minimax_connor_voice_id="ConnorClone001",
+        )
+        with patch.object(settings, "SETTINGS", configured), patch.object(settings, "save_settings"):
+            result = await settings.update_settings(update)
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(configured["siliconflow_key"], "keep-silicon")
+        self.assertEqual(configured["edge_tts_favorites"], ["edge:voice"])
+        self.assertEqual(configured["minimax_tts_key"], "sk-cp-plan")
+        self.assertEqual(configured["minimax_tts_model"], "speech-2.6-turbo")
+        self.assertEqual(configured["minimax_aion_voice_id"], "AionClone001")
+
     async def test_paid_voice_and_request_settings_are_preserved(self):
         with patch("tts.get_key", return_value="test"), patch.object(tts.httpx, "AsyncClient") as client:
             post = client.return_value.__aenter__.return_value.post
@@ -84,6 +125,27 @@ class TTSProviderTests(unittest.IsolatedAsyncioTestCase):
         body = post.call_args.kwargs["json"]
         self.assertEqual(body["voice"], "speech:existing-custom-voice")
         self.assertEqual(body["gain"], 0)
+
+    async def test_minimax_voice_uses_its_own_key_and_official_payload(self):
+        keys = {"minimax": "plan-key", "siliconflow": "silicon-key"}
+        with patch("tts.get_key", side_effect=lambda provider: keys[provider]), \
+             patch.object(tts, "SETTINGS", {"minimax_tts_model": "speech-2.6-hd"}, create=True), \
+             patch.object(tts.httpx, "AsyncClient") as client:
+            post = client.return_value.__aenter__.return_value.post
+            post.return_value.status_code = 200
+            post.return_value.json = Mock(return_value={
+                "data": {"audio": b"minimax-mp3".hex(), "status": 2},
+                "base_resp": {"status_code": 0, "status_msg": "success"},
+            })
+            result = await tts._request_tts_audio("你好。", "minimax:CloneVoice001")
+
+        self.assertEqual(result, b"minimax-mp3")
+        self.assertEqual(post.call_args.args[0], "https://api.minimax.cn/v1/t2a_v2")
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer plan-key")
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["model"], "speech-2.6-hd")
+        self.assertEqual(body["voice_setting"]["voice_id"], "CloneVoice001")
+        self.assertEqual(body["output_format"], "hex")
 
 
 if __name__ == "__main__":

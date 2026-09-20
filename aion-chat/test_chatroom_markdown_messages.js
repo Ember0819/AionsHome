@@ -45,12 +45,22 @@ function loadMessageRenderer() {
     renderToyAttachments: () => '',
     renderAttachments: () => '',
     timeStr: () => '16:42',
-    window: { LoungeVisitUI: null, ChatroomMarkdown: markdown },
+    window: { LoungeVisitUI: null, ChatroomMarkdown: markdown, SystemNoticeUI: require('./static/system-notice-ui.js') },
   };
   vm.createContext(context);
   vm.runInContext(`${rendererSource}\nthis.renderMessage = msgHTML;`, context);
   return context.renderMessage;
 }
+
+test('old background toy tags in either AI reply become folded display-only notices', () => {
+  for (const sender of ['aion','connor']) {
+    const html = loadMessageRenderer()({id:'old-toy',sender,created_at:1,attachments:[],content:'[SVAKOM:LOOP:4,1,2,2,0]查岗正文'});
+    assert.doesNotMatch(html, /SVAKOM:LOOP/);
+    assert.match(html, /<details class="system-notice-details">/);
+    assert.match(html, /查岗正文/);
+    assert.match(html, /SVAKOM:循环:4秒,慢速旋转伸缩/);
+  }
+});
 
 function renderStreamingMessage(sender = 'aion') {
   const source = fs.readFileSync(path.join(ROOT, 'static', 'chatroom.js'), 'utf8');

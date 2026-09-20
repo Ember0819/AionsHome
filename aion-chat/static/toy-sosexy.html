@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#fff7fa">
+  <title>SOSEXY · 独立控制</title>
+  <link rel="stylesheet" href="/static/toy-pages.css?v=20260919">
+</head>
+<body class="toy-page toy-control-page toy-sosexy-page">
+  <header class="toy-topbar">
+    <a class="toy-icon-button" href="/toys" aria-label="返回选择">‹</a>
+    <div>
+      <p class="toy-eyebrow">CLASSIC PRESETS</p>
+      <h1>SOSEXY</h1>
+    </div>
+    <button class="toy-switch-link" id="toySwitchLink" type="button" data-switch-profile="svakom">切换玩具</button>
+  </header>
+
+  <main class="toy-shell toy-control-shell">
+    <section class="toy-connection-card" aria-labelledby="sosexyConnectionTitle">
+      <div class="toy-device-mark toy-device-mark--sosexy" aria-hidden="true">✦</div>
+      <div class="toy-connection-copy">
+        <p class="toy-section-kicker">SOSEXY · 旧玩具</p>
+        <h2 id="sosexyConnectionTitle"><span class="toy-status-dot"></span><span id="toyConnectionState">未连接</span></h2>
+        <p id="toyConnectionDetail">连接后即可使用九档预设</p>
+      </div>
+      <button class="toy-primary-button" id="toyConnectButton" type="button">连接</button>
+    </section>
+
+    <section class="toy-panel">
+      <div class="toy-panel-heading">
+        <div><p class="toy-section-kicker">MY PRESETS</p><h2>九种心跳</h2></div>
+        <span class="toy-muted-label">轻触运行 · 齿轮编辑</span>
+      </div>
+      <div class="toy-preset-grid" id="sosexyPresetGrid" aria-live="polite"></div>
+    </section>
+
+    <details class="toy-log-panel">
+      <summary>连接与操作记录 <span>展开</span></summary>
+      <div class="toy-log" id="toyLog" aria-live="polite"><p>等待连接…</p></div>
+    </details>
+  </main>
+
+  <div class="toy-stop-dock">
+    <button class="toy-stop-button" id="toyStopAllButton" type="button" disabled><span aria-hidden="true">■</span> 全部停止</button>
+  </div>
+
+  <div class="toy-sheet-backdrop" id="sosexyEditor" hidden>
+    <section class="toy-sheet" role="dialog" aria-modal="true" aria-labelledby="sosexyEditorTitle">
+      <div class="toy-sheet-handle"></div>
+      <div id="sosexyEditorContent"></div>
+    </section>
+  </div>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/toy-navigation.js?v=20260919"></script>
+  <script src="/static/toy-sosexy-protocol.js?v=20260919"></script>
+  <script src="/static/toy-sosexy.js?v=20260919"></script>
+</body>
+</html>

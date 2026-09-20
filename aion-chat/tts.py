@@ -1,7 +1,7 @@
 """
 服务端流式 TTS 模块
 - 按句子边界切分 AI 回复文本
-- 异步并行调用所选线路（硅基流动 / Edge 免费）合成
+- 异步并行调用所选线路（硅基流动 / MiniMax / Edge 免费）合成
 - 通过 WebSocket 推送音频 URL 给前端顺序播放
 """
 
@@ -12,7 +12,7 @@ from collections import deque
 from pathlib import Path
 import httpx
 
-from config import get_key, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES
+from config import SETTINGS, get_key, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES
 from link_preview import strip_urls_for_message
 
 log = logging.getLogger("tts")
@@ -38,6 +38,14 @@ EDGE_VOICES = [
         ("zh-TW-YunJheNeural", "云哲 · 台湾男声"),
     )
 ]
+
+MINIMAX_VOICE_PREFIX = "minimax:"
+MINIMAX_TTS_MODELS = {
+    "speech-2.8-hd",
+    "speech-2.8-turbo",
+    "speech-2.6-hd",
+    "speech-2.6-turbo",
+}
 
 
 def _log_background_tts_failure(task: asyncio.Task):
@@ -90,6 +98,7 @@ _STRIP_PATTERNS = [
     re.compile(r'[\[［]\s*NEXT_CHAT\s*[:：]\s*[^\]］]+\s*[\]］]', re.IGNORECASE),
     re.compile(r'\[LUCKIN:[^\]]*\]', re.IGNORECASE),
     re.compile(r'\[TOY:[^\]]*\]'),
+    re.compile(r'\[SVAKOM\b[^\]]*(?:\]|$)', re.IGNORECASE),
     re.compile(r'\[MOMENT:[^\]]*\]'),
     re.compile(r'\[MEMORY:[^\]]*\]'),
     re.compile(r'\[微信消息[：:][^\]]*\]'),
@@ -242,6 +251,8 @@ def split_text_for_tts(text: str, *, min_chars: int = 300, max_chars: int = 500)
 async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -> bytes | None:
     if voice.startswith("edge:"):
         return await _request_edge_tts_audio(text, voice[5:])
+    if voice.startswith(MINIMAX_VOICE_PREFIX):
+        return await _request_minimax_tts_audio(text, voice[len(MINIMAX_VOICE_PREFIX):], seq=seq)
 
     key = get_key("siliconflow")
     if not key:
@@ -266,6 +277,80 @@ async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -
         if resp.status_code == 200:
             return resp.content
         log.warning("TTS API 错误: status=%d seq=%s attempt=%d", resp.status_code, seq, attempt + 1)
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
+async def _request_minimax_tts_audio(text: str, voice_id: str, *, seq: int | None = None) -> bytes | None:
+    """Synthesize one MP3 segment through the independent MiniMax pipeline."""
+    key = get_key("minimax")
+    if not key:
+        log.warning("TTS: 无 MiniMax 订阅 Key，跳过合成 seq=%s", seq)
+        return None
+    if not voice_id:
+        log.warning("TTS: MiniMax 音色 ID 为空 seq=%s", seq)
+        return None
+
+    model = str(SETTINGS.get("minimax_tts_model") or "speech-2.8-hd").strip()
+    if model not in MINIMAX_TTS_MODELS:
+        model = "speech-2.8-hd"
+    payload = {
+        "model": model,
+        "text": text,
+        "stream": False,
+        "voice_setting": {
+            "voice_id": voice_id,
+            "speed": 1,
+            "vol": 1,
+            "pitch": 0,
+        },
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1,
+        },
+        "language_boost": "Chinese",
+        "subtitle_enable": False,
+        "output_format": "hex",
+        "aigc_watermark": False,
+    }
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    "https://api.minimax.cn/v1/t2a_v2",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+        except httpx.HTTPError as exc:
+            log.warning("MiniMax TTS 连接失败: seq=%s attempt=%d error=%s", seq, attempt + 1, exc)
+            await asyncio.sleep(0.5 * (attempt + 1))
+            continue
+
+        if resp.status_code == 200:
+            try:
+                result = resp.json()
+                base_resp = result.get("base_resp") or {}
+                audio_hex = (result.get("data") or {}).get("audio")
+                if base_resp.get("status_code") in (None, 0) and audio_hex:
+                    audio = bytes.fromhex(audio_hex)
+                    if audio:
+                        return audio
+                log.warning(
+                    "MiniMax TTS 错误: status=%s msg=%s seq=%s",
+                    base_resp.get("status_code"),
+                    base_resp.get("status_msg") or "empty audio",
+                    seq,
+                )
+            except (ValueError, TypeError, AttributeError) as exc:
+                log.warning("MiniMax TTS 返回解析失败: seq=%s error=%s", seq, exc)
+        else:
+            log.warning("MiniMax TTS HTTP 错误: status=%d seq=%s attempt=%d", resp.status_code, seq, attempt + 1)
+
+        if resp.status_code < 500 and resp.status_code != 429:
+            break
         await asyncio.sleep(0.5 * (attempt + 1))
     return None
 

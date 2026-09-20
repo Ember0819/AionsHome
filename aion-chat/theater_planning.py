@@ -209,16 +209,19 @@ def outline_snapshot(book, chapters):
                 plans=[dict(title=c['title'], plan=c['plan'], number=c['number']) for c in chapters if not c.get('content')])
 
 
-async def install_outline(cid, book, chapters, proposal, versions):
+async def install_outline(cid, book, chapters, proposal, versions, confirmation=None):
     frozen = [c for c in chapters if c.get('content')]
     last = max((c['number'] for c in frozen), default=0)
     new_chapters = []
     remaining = [p for p in proposal['plans'] if p.get('number', last+1) > last]
     for i, p in enumerate(remaining):
         new_chapters.append(dict(id=s.uid('nc_'), kind='chapter', conv_id=cid, number=last+i+1,
-                                 title=p['title'], plan=p['plan'], content='', status='planned', revision=1,
+                                 title=p['title'], plan=p['plan'],
+                                 **{k: p[k] for k in ('min_chars', 'max_chars') if p.get(k) is not None},
+                                 content='', status='planned', revision=1,
                                  summary='', images=[], versions=[], audio=None))
-    book.update(outline=proposal['outline'], consensus=proposal['consensus'], phase='review', outline_versions=versions)
+    book.update(outline=proposal['outline'], consensus=proposal['consensus'],
+                phase='writing' if confirmation else 'review', outline_versions=versions)
     # Swap only unwritten plans after a successful generation, in one transaction.
     async with s.get_db() as db:
         await s.setup(db)
@@ -228,6 +231,9 @@ async def install_outline(cid, book, chapters, proposal, versions):
         for c in new_chapters:
             await db.execute('INSERT INTO theater_studio VALUES(?,?,?,?)', (c['id'], 'chapter', cid, json.dumps(c, ensure_ascii=False)))
         await db.execute('UPDATE theater_studio SET data=? WHERE id=?', (json.dumps(book, ensure_ascii=False), cid))
+        if confirmation:
+            await db.execute('UPDATE theater_studio SET data=? WHERE id=?',
+                             (json.dumps(confirmation, ensure_ascii=False), confirmation['id']))
         await db.commit()
 
 
@@ -381,14 +387,22 @@ async def confirm_outline(cid: str, body: ConfirmOutline | None = None):
             if draft.get('confirmed_conversation'):
                 await s.conversation(draft['confirmed_conversation']['id'])
                 return {'conversation':draft['confirmed_conversation']}
-            title, _, _ = await s.conversation(cid)
+            title, model, persona_id = await s.conversation(cid)
             source = dict(draft['settings'], mode='novel', premise=draft.get('premise',''),
                           consensus=draft['consensus'], outline=draft['outline'])
+            book, chapters = await state(cid)
+            if not chapters:
+                # A first outline belongs to the story where its discussion took place.
+                conv = dict(id=cid, title=title, model=model, persona_id=persona_id)
+                book.update(source)
+                await install_outline(cid, book, chapters, draft, [],
+                                      confirmation=dict(draft, confirmed_conversation=conv))
+                return {'conversation':conv}
             conv = await s.create_outline_copy(cid, source, draft['plans'],
                          s.CopyOutlineRequest(title=body.title.strip() or title+'（重写版）'), confirmation=draft)
             return {'conversation':conv}
         if draft and not draft.get('confirmed_conversation'):
-            raise HTTPException(409, '请打开待确认草稿，确认后创建新剧场')
+            raise HTTPException(409, '请打开待确认草稿，再确认大纲')
         # Compatibility for existing works whose manual edits still need confirmation.
         book, chapters = await state(cid)
         if book['phase'] != 'review' or not book.get('outline') or not chapters:

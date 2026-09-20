@@ -61,6 +61,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
+import android.media.audiofx.LoudnessEnhancer;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
@@ -180,6 +181,7 @@ public class AionPushService extends Service {
     private MediaPlayer mediaPlayer;
     private final Object phoneCameraAlertLock = new Object();
     private MediaPlayer phoneCameraAlertPlayer;
+    private LoudnessEnhancer phoneCameraAlertEnhancer;
 
     private volatile int msgReceived = 0;
     private volatile long lastMessageTime = 0;
@@ -2919,11 +2921,13 @@ public class AionPushService extends Service {
     private long startPhoneCameraAlert() {
         stopPhoneCameraAlert();
         MediaPlayer player = new MediaPlayer();
+        LoudnessEnhancer enhancer = null;
         try (AssetFileDescriptor asset = getAssets().openFd(
                 "public/AionMonitoralart.mp3")) {
+            // Follow media volume/output so vibration mode does not mute the camera cue.
             player.setAudioAttributes(new AudioAttributes.Builder()
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .build());
             player.setDataSource(
                     asset.getFileDescriptor(),
@@ -2936,8 +2940,10 @@ public class AionPushService extends Service {
                 return true;
             });
             player.prepare();
+            enhancer = PlaybackLoudness.attach(this, player);
             synchronized (phoneCameraAlertLock) {
                 phoneCameraAlertPlayer = player;
+                phoneCameraAlertEnhancer = enhancer;
             }
             player.start();
             long startedElapsedMs = SystemClock.elapsedRealtime();
@@ -2948,10 +2954,14 @@ public class AionPushService extends Service {
             return captureTargetElapsedMs;
         } catch (Exception error) {
             Log.e(TAG, "phone camera alert unavailable; capture continues", error);
+            if (enhancer != null) {
+                try { enhancer.release(); } catch (Exception ignored) {}
+            }
             try { player.release(); } catch (Exception ignored) {}
             synchronized (phoneCameraAlertLock) {
                 if (phoneCameraAlertPlayer == player) {
                     phoneCameraAlertPlayer = null;
+                    phoneCameraAlertEnhancer = null;
                 }
             }
             return 0L;
@@ -2964,10 +2974,16 @@ public class AionPushService extends Service {
 
     private void releasePhoneCameraAlert(MediaPlayer expected) {
         MediaPlayer player;
+        LoudnessEnhancer enhancer;
         synchronized (phoneCameraAlertLock) {
             if (expected != null && phoneCameraAlertPlayer != expected) return;
             player = phoneCameraAlertPlayer;
             phoneCameraAlertPlayer = null;
+            enhancer = phoneCameraAlertEnhancer;
+            phoneCameraAlertEnhancer = null;
+        }
+        if (enhancer != null) {
+            try { enhancer.release(); } catch (Exception ignored) {}
         }
         if (player != null) {
             try {

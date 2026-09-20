@@ -10,9 +10,33 @@ import capabilities
 import context_builder
 from context_builder import strip_tool_commands
 from web_search import WebCommandStreamFilter
+from safe_live_stream import consume_safe_live_stream
 
 
 class ActiveMemoryCapabilityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_split_memory_commands_keep_surrounding_text_in_both_stream_modes(self):
+        for command in (
+            "[MEMORY_SEARCH：午饭】",
+            "［MEMORY_SEARCH:午饭]",
+            "【  memory_search \n：午饭｜latest］",
+        ):
+            with self.subTest(command=command):
+                text = "我查查。" + command + "稍等。"
+                stream_filter = WebCommandStreamFilter()
+                visible = "".join(stream_filter.feed(char) for char in text) + stream_filter.flush()
+                self.assertEqual(visible, "我查查。稍等。")
+                self.assertEqual(strip_tool_commands(text), "我查查。稍等。")
+
+                async def source():
+                    for char in text:
+                        yield char
+
+                visible_chunks = []
+                result = await consume_safe_live_stream(source(), visible_chunks.append)
+                self.assertIsNone(result.stop_reason)
+                self.assertEqual(result.committed_text, text)
+                self.assertEqual("".join(visible_chunks), "我查查。稍等。")
+
     async def test_prompt_is_present_only_when_enabled_or_not_excluded(self):
         with patch.object(capabilities, "is_capability_enabled", return_value=True):
             enabled = await capabilities.build_capability_prompt_items("宝宝")

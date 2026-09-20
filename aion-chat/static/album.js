@@ -285,6 +285,46 @@
   $('fullImage').onerror = () => { $('fullImage').hidden = true; $('missingImage').hidden = false; };
   $('previousButton').onclick = () => stepPhoto(-1);
   $('nextButton').onclick = () => stepPhoto(1);
+  $('downloadLink').onclick = async event => {
+    // APK 的 WebView 不接管附件下载，复用聊天图片的原生相册保存接口。
+    let saver;
+    for (const frame of [window, window.parent, window.top]) {
+      try {
+        if (typeof frame.AionImageSaver?.save === 'function') { saver = frame.AionImageSaver; break; }
+      } catch (_) { /* 跨域父页面不可访问时，继续检查当前可用的接口。 */ }
+    }
+    if (!saver) return; // 普通浏览器仍由原有附件链接下载。
+    event.preventDefault();
+    if (state.downloading) return;
+    const photo = current();
+    const link = $('downloadLink');
+    const message = text => {
+      if ($('photoDialog').open && current()?.id === photo.id) $('viewerMessage').textContent = text;
+    };
+    state.downloading = true;
+    link.textContent = '保存中…';
+    link.setAttribute('aria-disabled', 'true');
+    message('正在获取原图…');
+    try {
+      const response = await fetch(`/api/album/photos/${photo.id}/download`);
+      if (!response.ok) throw new Error(`原图读取失败（${response.status}）`);
+      const blob = await response.blob();
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(new Error('图片读取失败，请重试'));
+        reader.readAsDataURL(blob);
+      });
+      saver.save(base64, photo.filename);
+      message('已交给手机保存，请查看系统保存提示。');
+    } catch (error) {
+      message('保存失败：' + error.message + '。请重试。');
+    } finally {
+      state.downloading = false;
+      link.textContent = '下载';
+      link.removeAttribute('aria-disabled');
+    }
+  };
   let detailViewRequest = 0;
   async function loadPhotoViews(photoId) {
     const request = ++detailViewRequest;

@@ -70,10 +70,99 @@
       }
     }
 
+    // Long-form reading needs a real pause and seek, unlike one-shot chat clips.
+    class NativeReadingAudio extends NativeTtsAudio {
+      constructor(bridge, url) {
+        super(bridge);
+        this.duration = NaN;
+        this._currentTime = 0;
+        this.src = url || '';
+      }
+
+      get src() { return this._src || ''; }
+      set src(value) {
+        if (this._src) this.bridge.stop(this.playerId);
+        players.delete(this.playerId);
+        this._src = String(value || '');
+        this._loaded = false;
+        this._loading = false;
+        this.paused = true;
+        this.duration = NaN;
+        this._currentTime = 0;
+      }
+
+      get currentTime() { return this._currentTime; }
+      set currentTime(value) {
+        this._currentTime = Math.max(0, Number(value) || 0);
+        if (this._loaded) this.bridge.seekAudio(this.playerId, this._currentTime);
+      }
+
+      load() {
+        if (!this.src) return;
+        if (this._loaded || this._loading) this.bridge.stop(this.playerId);
+        players.delete(this.playerId);
+        this.playerId = `tts-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${++nextPlayerId}`;
+        players.set(this.playerId, this);
+        this.currentSrc = this.src;
+        this._loading = true;
+        this._loaded = false;
+        this.paused = true;
+        this.ended = false;
+        this.error = null;
+        this.duration = NaN;
+        this._currentTime = 0;
+        if (!this.bridge.prepareAudio(this.playerId, this.src)) {
+          this._onNativeEvent('error');
+        }
+      }
+
+      play() {
+        if (!this.src) return Promise.reject(new Error('TTS audio source is empty'));
+        if (!this._loaded && !this._loading) this.load();
+        if (this.error) return Promise.reject(new Error('Native reading playback was rejected'));
+        this.paused = false;
+        if (this._loaded) this.bridge.resumeAudio(this.playerId);
+        return Promise.resolve();
+      }
+
+      pause() {
+        if (this.paused) return;
+        this.paused = true;
+        if (this._loaded) this.bridge.pauseAudio(this.playerId);
+        if (typeof this.onpause === 'function') this.onpause();
+      }
+
+      _onNativeEvent(type, event = {}) {
+        if (Number.isFinite(event.duration)) this.duration = event.duration;
+        if (Number.isFinite(event.currentTime)) this._currentTime = event.currentTime;
+        if (type === 'loadedmetadata') {
+          this._loaded = true;
+          this._loading = false;
+          if (typeof this.onloadedmetadata === 'function') this.onloadedmetadata();
+          if (!this.paused) this.bridge.resumeAudio(this.playerId);
+          return;
+        }
+        if (type === 'timeupdate') {
+          if (typeof this.ontimeupdate === 'function') this.ontimeupdate();
+          return;
+        }
+        if (type === 'playing') {
+          if (this.paused) return;
+          if (typeof this.onplay === 'function') this.onplay();
+        }
+        if (type === 'ended' || type === 'error') {
+          this._loaded = false;
+          this._loading = false;
+          players.delete(this.playerId);
+        }
+        super._onNativeEvent(type);
+      }
+    }
+
     root.onAionNativeTtsEvent = event => {
       if (!event || !event.playerId) return;
       const player = players.get(String(event.playerId));
-      if (player) player._onNativeEvent(String(event.type || ''));
+      if (player) player._onNativeEvent(String(event.type || ''), event);
       if (!root.document || typeof root.document.querySelectorAll !== 'function') return;
       root.document.querySelectorAll('iframe').forEach(frame => {
         try {
@@ -91,6 +180,15 @@
         return new NativeTtsAudio(bridge);
       }
       return new root.Audio();
+    };
+
+    root.createTtsAudio = url => {
+      const bridge = root.AionTtsAudio;
+      if (bridge && ['prepareAudio', 'pauseAudio', 'resumeAudio', 'seekAudio', 'stop']
+          .every(method => typeof bridge[method] === 'function')) {
+        return new NativeReadingAudio(bridge, url);
+      }
+      return new root.Audio(url);
     };
   }
 

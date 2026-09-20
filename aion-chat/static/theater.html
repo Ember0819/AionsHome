@@ -86,32 +86,55 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .config-popup input[type="range"] { flex:1; accent-color:var(--accent); cursor:pointer; }
 .config-popup .slider-val { font-size:13px; color:var(--text); min-width:40px; text-align:right; }
 
-/* ── 角色选择区 ── */
-.persona-section { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
-.persona-card { display:flex; align-items:center; gap:8px; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-top:6px; cursor:pointer; }
-.persona-card:hover { border-color:var(--accent); }
-.persona-card.active { border-color:var(--accent); background:rgba(200,149,108,0.1); }
-.persona-card .p-name { flex:1; font-size:13px; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.persona-card .p-actions { display:flex; gap:4px; }
-.persona-card .p-actions button { background:none; border:none; color:var(--text3); font-size:13px; cursor:pointer; padding:2px 4px; }
-.persona-card .p-actions button:hover { color:var(--text); }
-.persona-add-btn { width:100%; margin-top:6px; padding:8px; background:none; border:1px dashed var(--border); border-radius:8px; color:var(--text3); font-size:13px; cursor:pointer; }
-.persona-add-btn:hover { border-color:var(--accent); color:var(--accent); }
+/* ── 独立设置与角色管理 ── */
+.settings-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+.settings-heading h3 { margin:0; font-size:18px; }
+.settings-close { border:1px solid var(--border); background:var(--surface2); color:var(--text); border-radius:8px; padding:8px 12px; cursor:pointer; }
+#modelSettingsOverlay .config-popup { display:block; position:static; width:100%; min-width:0; max-width:560px; max-height:88vh; max-height:min(88dvh,100%); padding:24px; border-color:var(--border-strong); border-radius:18px; box-shadow:0 24px 90px #0008; }
+.persona-switcher { display:flex; gap:8px; margin-bottom:12px; }
+.persona-switcher select { flex:1; min-width:0; }
+.persona-switcher button { flex-shrink:0; border:1px dashed var(--border); background:var(--surface2); color:var(--text); border-radius:8px; padding:8px 12px; cursor:pointer; }
+.persona-modal .btn-row .persona-delete { margin-right:auto; color:var(--danger); }
+.persona-field-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:12px; margin-bottom:4px; }
+.persona-modal .persona-field-heading label { margin:0; }
+.persona-save-status { font-size:12px; color:var(--text2); }
 
 /* ── 角色编辑弹窗 ── */
-.persona-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:100; align-items:center; justify-content:center; }
+.persona-modal-overlay { display:none; position:fixed; inset:0; padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); background:rgba(3,7,25,.65); backdrop-filter:blur(5px); -webkit-backdrop-filter:blur(5px); z-index:100; align-items:center; justify-content:center; }
 .persona-modal-overlay.show { display:flex; }
-.persona-modal { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:24px; width:90vw; max-width:440px; max-height:80vh; overflow-y:auto; }
-.persona-modal h3 { font-size:16px; margin-bottom:16px; color:var(--text); }
+.persona-modal { display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--border-strong); border-radius:18px; padding:24px; width:100%; max-width:1040px; height:88vh; height:88dvh; max-height:100%; overflow:hidden; box-shadow:0 24px 90px #0008; }
+.persona-modal > :not(textarea) { flex-shrink:0; }
+.persona-modal h3 { font-size:18px; margin-bottom:16px; color:var(--text); }
+.persona-modal .settings-heading h3 { margin:0; }
 .persona-modal label { display:block; font-size:12px; color:var(--text2); margin-bottom:4px; margin-top:12px; }
 .persona-modal label:first-of-type { margin-top:0; }
 .persona-modal input, .persona-modal select { width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:14px; outline:none; }
-.persona-modal textarea { width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:14px; outline:none; min-height:120px; resize:vertical; font-family:inherit; }
+.persona-modal textarea { flex:1; min-height:0; width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:16px 18px; font-size:16px; line-height:1.85; outline:none; resize:none; overflow-y:auto; font-family:inherit; }
 .persona-modal .btn-row { display:flex; gap:8px; margin-top:16px; justify-content:flex-end; }
 .persona-modal .btn-row button { padding:8px 18px; border:none; border-radius:8px; font-size:14px; cursor:pointer; }
 .persona-modal .btn-save { background:var(--accent); color:#fff; }
 .persona-modal .btn-save:hover { opacity:0.85; }
 .persona-modal .btn-cancel { background:var(--surface2); color:var(--text); }
+@media (max-width:600px) {
+  .persona-modal { padding:16px; }
+  .persona-modal h3 { margin-bottom:12px; }
+  .persona-modal input { font-size:16px; }
+  .persona-modal textarea { padding:12px; }
+  .persona-modal .btn-row { margin-top:12px; }
+  .persona-modal .btn-row button { min-height:44px; padding:10px; }
+  #modelSettingsOverlay .config-popup { padding:20px; }
+}
+@media (max-height:500px) {
+  .persona-modal { padding-top:8px; padding-bottom:8px; }
+  .persona-modal h3 { font-size:16px; margin-bottom:6px; }
+  .persona-modal label { margin-top:6px; }
+  .persona-modal input { padding:6px 12px; }
+  .persona-modal .btn-row { margin-top:8px; }
+  .persona-modal .settings-heading { margin-bottom:6px; }
+  .persona-switcher { margin-bottom:6px; }
+  .persona-modal select { padding:6px 12px; }
+  .persona-field-heading { margin-top:6px; }
+}
 
 /* ── TTS 开关 ── */
 .tts-section { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
@@ -139,6 +162,7 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .msg-row.user .msg-role-name { color:var(--accent); }
 .msg-row.assistant .msg-role-name { color:#8ab87a; }
 .msg-time { font-size: 10px; color: var(--text3); }
+.msg-word-count { font-size:11px; color:var(--text3); white-space:nowrap; flex-shrink:0; font-variant-numeric:tabular-nums; }
 .msg-actions { position:relative; display:flex; align-items:center; flex-shrink:0; }
 .msg-dots { background:none; border:none; color:var(--text3); font-size:14px; cursor:pointer; padding:0 4px; line-height:1; display:none; }
 .msg-dots:hover { color:var(--text); }
@@ -237,7 +261,7 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
   .message-nav { right:6px; }
 }
 </style>
-<link rel="stylesheet" href="/static/theater-studio.css?v=20260913-outline-layout">
+<link rel="stylesheet" href="/static/theater-studio.css?v=20260917-reading-follow">
 </head>
 <body class="theater-page studio-shell" data-theme="dark">
 <div class="app">
@@ -255,9 +279,46 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
   <div class="chat-area">
     <div class="chat-header">
       <button class="menu-btn" onclick="toggleSidebar()">☰</button>
-      <div class="title" id="chatTitle" onclick="renameCurrent()">小剧场</div>
+      <div class="studio-title-group" id="studioTitleGroup">
+        <div class="title" id="chatTitle" onclick="renameCurrent()">小剧场</div>
+        <div class="studio-selection-summary" id="theaterSelectionSummary" role="status" aria-live="polite">
+          <span id="theaterSelectedPersona">未选人设</span><span class="selection-dot" aria-hidden="true">·</span><span id="theaterSelectedModel">未选模型</span>
+        </div>
+      </div>
       <button class="config-btn" onclick="toggleConfig(event)">⚙</button>
-      <div class="config-popup" id="configPopup">
+    </div>
+
+    <div class="tts-top-player" id="ttsTopPlayer" aria-label="音频播放器">
+      <button id="ttsTopToggle" type="button" onclick="toggleTopTTS()" title="播放或暂停">▶</button>
+      <span class="tts-time" id="ttsTopCurrent">00:00</span>
+      <input id="ttsTopSeek" type="range" min="0" max="0" step="0.1" value="0"
+        oninput="seekTopTTS(this.value)" aria-label="音频进度" disabled>
+      <span class="tts-time" id="ttsTopDuration">合成中</span>
+      <button id="ttsTopStop" type="button" onclick="stopTTSPlayback()" title="停止播放">✕</button>
+    </div>
+
+    <div class="messages" id="messages"></div>
+
+    <div class="input-box">
+      <div class="message-nav" aria-label="按消息跳转">
+        <button type="button" onclick="navigateMessage(-1)" title="当前或上一条消息开头" aria-label="当前或上一条消息开头">↑</button>
+        <button type="button" onclick="navigateMessage(1)" title="下一条消息开头" aria-label="下一条消息开头">↓</button>
+      </div>
+      <div class="preview-area" id="previewArea"></div>
+      <div class="input-row">
+        <button class="upload-btn" onclick="$('fileInput').click()">📎</button>
+        <input type="file" id="fileInput" accept="image/*,video/*" multiple style="display:none" onchange="handleFileSelect(this)">
+        <textarea id="input" rows="1" placeholder="输入消息…" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="send()">➤</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 模型与音色 -->
+<div class="persona-modal-overlay" id="modelSettingsOverlay" onclick="if(event.target===this)closeModelSettings()">
+      <div class="config-popup" id="configPopup" role="dialog" aria-modal="true" aria-labelledby="modelSettingsTitle">
+        <header class="settings-heading"><h3 id="modelSettingsTitle">模型与音色</h3><button class="settings-close" onclick="closeModelSettings()" aria-label="关闭模型与音色">✕</button></header>
         <label>模型</label>
         <select id="modelSelect" onchange="changeModel()"></select>
 
@@ -289,54 +350,26 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
           <a href="/tts-test" style="display:inline-block;margin-top:10px;color:var(--accent)">试听并挑选免费音色 →</a>
         </div>
 
-        <!-- 角色管理 -->
-        <div class="persona-section">
-          <label style="margin-top:0">🎭 角色</label>
-          <div id="personaList"></div>
-          <button class="persona-add-btn" onclick="openPersonaModal()">＋ 新建角色</button>
-        </div>
       </div>
-    </div>
-
-    <div class="tts-top-player" id="ttsTopPlayer" aria-label="音频播放器">
-      <button id="ttsTopToggle" type="button" onclick="toggleTopTTS()" title="播放或暂停">▶</button>
-      <span class="tts-time" id="ttsTopCurrent">00:00</span>
-      <input id="ttsTopSeek" type="range" min="0" max="0" step="0.1" value="0"
-        oninput="seekTopTTS(this.value)" aria-label="音频进度" disabled>
-      <span class="tts-time" id="ttsTopDuration">合成中</span>
-      <button id="ttsTopStop" type="button" onclick="stopTTSPlayback()" title="停止播放">✕</button>
-    </div>
-
-    <div class="messages" id="messages"></div>
-
-    <div class="input-box">
-      <div class="message-nav" aria-label="按消息跳转">
-        <button type="button" onclick="navigateMessage(-1)" title="当前或上一条消息开头" aria-label="当前或上一条消息开头">↑</button>
-        <button type="button" onclick="navigateMessage(1)" title="下一条消息开头" aria-label="下一条消息开头">↓</button>
-      </div>
-      <div class="preview-area" id="previewArea"></div>
-      <div class="input-row">
-        <button class="upload-btn" onclick="$('fileInput').click()">📎</button>
-        <input type="file" id="fileInput" accept="image/*,video/*" multiple style="display:none" onchange="handleFileSelect(this)">
-        <textarea id="input" rows="1" placeholder="输入消息…" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
-        <button class="send-btn" id="sendBtn" onclick="send()">➤</button>
-      </div>
-    </div>
-  </div>
 </div>
 
-<!-- 角色编辑弹窗 -->
+<!-- 角色管理 -->
 <div class="persona-modal-overlay" id="personaModalOverlay" onclick="if(event.target===this)closePersonaModal()">
-  <div class="persona-modal">
-    <h3 id="personaModalTitle">新建角色</h3>
+  <div class="persona-modal" role="dialog" aria-modal="true" aria-labelledby="personaModalTitle">
+    <header class="settings-heading"><h3 id="personaModalTitle">角色管理</h3><button class="settings-close" onclick="closePersonaModal()" aria-label="关闭角色管理">✕</button></header>
+    <div class="persona-switcher">
+      <select id="personaList" aria-label="切换编辑角色" onchange="openPersonaModal(this.value)"></select>
+      <button onclick="openPersonaModal('')">＋ 新建角色</button>
+    </div>
     <input type="hidden" id="personaEditId">
-    <label>角色名称</label>
-    <input type="text" id="personaName" placeholder="角色名">
-    <label>角色设定</label>
-    <textarea id="personaText" placeholder="角色的人设 / system prompt"></textarea>
+    <label for="personaName">角色名称</label>
+    <input type="text" id="personaName" placeholder="角色名" oninput="personaEdited()">
+    <div class="persona-field-heading"><label for="personaText">角色设定</label><span id="personaSaveStatus" class="persona-save-status" role="status" aria-live="polite"></span></div>
+    <textarea id="personaText" placeholder="角色的人设 / system prompt" oninput="personaEdited()"></textarea>
     <div class="btn-row">
-      <button class="btn-cancel" onclick="closePersonaModal()">取消</button>
-      <button class="btn-save" onclick="savePersona()">保存</button>
+      <button class="btn-cancel persona-delete" id="personaDelete" onclick="deletePersona($('personaEditId').value)">删除角色</button>
+      <button class="btn-cancel" id="personaUse" onclick="useEditingPersona()">用于当前剧场</button>
+      <button class="btn-save" id="personaSave" onclick="savePersona()">保存</button>
     </div>
   </div>
 </div>
@@ -346,7 +379,8 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 
 <script src="/static/theme.js?v=theme-20260905-theater-v2"></script>
 <script src="/static/theater_tts_queue.js?v=theater-tts-20260713"></script>
-<script src="/static/tts-voices.js?v=favorites-20260912"></script>
+<script src="/static/native-tts-audio.js?v=20260915-reading-loudness"></script>
+<script src="/static/tts-voices.js?v=minimax-20260916"></script>
 <script>
 /* ══════════════════════════════════════════════════
    小剧场 — 独立聊天功能，不涉及记忆库
@@ -453,6 +487,7 @@ async function init() {
 function populateModelSelects() {
   const opts = models.map(m => `<option value="${m}">${m}</option>`).join('');
   $('modelSelect').innerHTML = opts;
+  updateTheaterSelectionSummary();
 }
 
 /* ── TTS 音色加载 ── */
@@ -711,6 +746,10 @@ async function loadOlderMessages() {
 }
 
 /* ── 消息渲染 ── */
+function messageWordCount(content) {
+  return [...(content || '').replace(/<meta>[\s\S]*?<\/meta>/g, '').replace(/\s/g, '')].length;
+}
+
 function reasoningDetailsHtml(m) {
   const reasoning = (m.reasoning_content || '').trim();
   if (m.role !== 'assistant' || !reasoning) return '';
@@ -747,6 +786,8 @@ function updateStreamingReasoning(msgId, delta) {
 function updateStreamingBody(msgId, content) {
   const msg = currentMessages.find(m => m.id === msgId);
   if (msg) msg.content = content;
+  const wordCount = document.querySelector(`.msg-row[data-id="${msgId}"] .msg-word-count`);
+  if (wordCount) wordCount.textContent = `${messageWordCount(content)} 字`;
   const body = document.querySelector(`.msg-row[data-id="${msgId}"] .msg-body-bubble`);
   if (!body) return;
   const display = content.replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
@@ -816,6 +857,7 @@ function renderMessages() {
             <button onclick="delMsg('${m.id}')">删除</button>
           </div>
         </div>
+        ${!isUser ? `<span class="msg-word-count" title="正文字数（不含空白和思考过程）">${messageWordCount(m.content)} 字</span>` : ''}
       </div>
       <div class="msg-bubbles">${bubblesHtml}</div>
       ${attHtml}
@@ -912,10 +954,6 @@ function toggleMenu(e, id) {
 }
 document.addEventListener('click', (e) => {
   document.querySelectorAll('.msg-menu.show').forEach(m => m.classList.remove('show'));
-  const cp = $('configPopup');
-  if (cp.classList.contains('show') && !cp.contains(e.target) && e.target !== $('configPopup')) {
-    cp.classList.remove('show');
-  }
 });
 
 /* ── 编辑 ── */
@@ -1229,6 +1267,7 @@ function autoResize(ta) {
 
 /* ── 模型切换 ── */
 async function changeModel() {
+  updateTheaterSelectionSummary();
   if (!currentConvId) return;
   const model = $('modelSelect').value;
   await api('PUT', `/api/theater/conversations/${currentConvId}`, { model });
@@ -1238,12 +1277,18 @@ async function changeModel() {
 
 /* ── 配置弹窗 ── */
 function toggleConfig(e) {
-  e.stopPropagation();
-  $('configPopup').classList.toggle('show');
-  if ($('configPopup').classList.contains('show')) loadTTSVoices();
+  e?.stopPropagation();
+  if ($('modelSettingsOverlay').classList.contains('show')) closeModelSettings();
+  else openModelSettings();
 }
-// 阻止配置弹窗内部点击冒泡到 document（防止 select/slider 等操作时弹窗关闭）
-$('configPopup').addEventListener('click', e => e.stopPropagation());
+function openModelSettings() {
+  if ($('personaModalOverlay').classList.contains('show') && !closePersonaModal()) return;
+  $('modelSettingsOverlay').classList.add('show');
+  loadTTSVoices();
+}
+function closeModelSettings() {
+  $('modelSettingsOverlay').classList.remove('show');
+}
 
 /* ── TTS 播放 ── */
 const TTSQueue = window.TheaterTTSQueue;
@@ -1541,7 +1586,7 @@ function continueSegmentPlayback() {
   $('ttsTopToggle').disabled = false;
 
   const token = ++ttsPlaybackToken;
-  const audio = new Audio(chunk.url);
+  const audio = window.createTtsAudio(chunk.url);
   audio.preload = 'auto';
   currentAudio = audio;
   ttsPlaying = true;
@@ -1609,7 +1654,7 @@ function startMergedPlayback(msgId, url, startAt = 0, options = {}) {
   $('ttsTopDuration').textContent = '加载中';
   $('ttsTopToggle').disabled = false;
 
-  const audio = new Audio(url);
+  const audio = window.createTtsAudio(url);
   audio.preload = 'metadata';
   currentAudio = audio;
   ttsPlaying = true;
@@ -1791,77 +1836,161 @@ function playManualReplayNext() {
 }
 
 /* ── 角色管理 ── */
+let personaDraft = { name: '', persona: '' };
+let personaBusy = false;
+
+function personaHasChanges() {
+  return $('personaName').value !== personaDraft.name || $('personaText').value !== personaDraft.persona;
+}
+
+function personaEdited() {
+  $('personaSaveStatus').textContent = personaHasChanges() ? '未保存' : '';
+  updatePersonaActions();
+}
+
+function updatePersonaActions() {
+  const id = $('personaEditId').value;
+  $('personaDelete').disabled = personaBusy || !id;
+  $('personaUse').disabled = personaBusy || !id || personaHasChanges() || id === currentPersonaId;
+  $('personaUse').textContent = id && id === currentPersonaId ? '当前使用中' : '用于当前剧场';
+}
+
+function setPersonaBusy(busy) {
+  personaBusy = busy;
+  document.querySelectorAll('.persona-modal button, .persona-modal input, .persona-modal textarea, .persona-modal select').forEach(el => el.disabled = busy);
+  updatePersonaActions();
+}
+
 function renderPersonaList() {
+  updateTheaterSelectionSummary();
   const el = $('personaList');
   if (!el) return;
-  el.innerHTML = personas.map(p => `
-    <div class="persona-card ${p.id === currentPersonaId ? 'active' : ''}" onclick="selectPersona('${p.id}')">
-      <span class="p-name">🎭 ${escHtml(p.name)}</span>
-      <div class="p-actions">
-        <button onclick="event.stopPropagation();openPersonaModal('${p.id}')" title="编辑">✏</button>
-        <button onclick="event.stopPropagation();deletePersona('${p.id}')" title="删除">✕</button>
-      </div>
-    </div>
-  `).join('');
+  const editId = $('personaEditId').value;
+  el.innerHTML = (editId ? '' : '<option value="">新建角色</option>') + personas.map(p =>
+    `<option value="${escHtml(p.id)}">${escHtml(p.name)}${p.id === currentPersonaId ? ' · 当前使用' : ''}</option>`
+  ).join('');
+  el.value = editId;
+  updatePersonaActions();
+}
+
+function updateTheaterSelectionSummary() {
+  const persona = personas.find(p => p.id === currentPersonaId)?.name || '未选人设';
+  const model = $('modelSelect').value || '未选模型';
+  $('theaterSelectedPersona').textContent = persona;
+  $('theaterSelectedPersona').title = `人设：${persona}`;
+  $('theaterSelectedModel').textContent = model;
+  $('theaterSelectedModel').title = `模型：${model}`;
+  $('theaterSelectionSummary').title = `人设：${persona} · 模型：${model}`;
 }
 
 async function selectPersona(pid) {
-  currentPersonaId = pid;
-  renderPersonaList();
   if (currentConvId) {
-    await api('PUT', `/api/theater/conversations/${currentConvId}`, { persona_id: pid });
+    const result = await api('PUT', `/api/theater/conversations/${currentConvId}`, { persona_id: pid });
+    if (result?.error || result?.detail) throw new Error('切换角色失败');
     const conv = conversations.find(c => c.id === currentConvId);
     if (conv) conv.persona_id = pid;
   }
+  currentPersonaId = pid;
+  renderPersonaList();
 }
 
 function openPersonaModal(editId) {
   const overlay = $('personaModalOverlay');
-  if (editId) {
-    const p = personas.find(x => x.id === editId);
-    if (!p) return;
-    $('personaModalTitle').textContent = '编辑角色';
-    $('personaEditId').value = editId;
-    $('personaName').value = p.name;
-    $('personaText').value = p.persona;
-  } else {
-    $('personaModalTitle').textContent = '新建角色';
-    $('personaEditId').value = '';
-    $('personaName').value = '';
-    $('personaText').value = '';
+  if (personaBusy) return;
+  if (editId === undefined) {
+    editId = [$('personaEditId').value, currentPersonaId, personas[0]?.id].find(id => personas.some(p => p.id === id)) || '';
   }
+  if (overlay.classList.contains('show')) {
+    if (editId === $('personaEditId').value) return;
+    if (personaHasChanges() && !confirm('当前角色有未保存的修改，放弃修改并切换角色？')) {
+      $('personaList').value = $('personaEditId').value;
+      return;
+    }
+  }
+  const p = personas.find(x => x.id === editId);
+  if (editId && !p) return;
+  $('personaEditId').value = editId;
+  $('personaName').value = p?.name || '';
+  $('personaText').value = p?.persona || '';
+  $('personaText').scrollTop = 0;
+  personaDraft = { name: $('personaName').value, persona: $('personaText').value };
+  $('personaSaveStatus').textContent = '';
+  renderPersonaList();
+  closeModelSettings();
   overlay.classList.add('show');
 }
 
 function closePersonaModal() {
+  if (personaBusy) return false;
+  if (personaHasChanges() && !confirm('当前角色有未保存的修改，放弃修改并关闭？')) return false;
   $('personaModalOverlay').classList.remove('show');
+  return true;
 }
 
 async function savePersona() {
+  if (personaBusy) return;
   const editId = $('personaEditId').value;
   const data = {
     name: $('personaName').value.trim() || '未命名角色',
     persona: $('personaText').value,
   };
-  if (editId) {
-    const updated = await api('PUT', `/api/theater/personas/${editId}`, data);
-    const idx = personas.findIndex(p => p.id === editId);
-    if (idx >= 0) personas[idx] = { ...personas[idx], ...updated };
-  } else {
-    const created = await api('POST', '/api/theater/personas', data);
-    personas.push(created);
+  setPersonaBusy(true);
+  $('personaSaveStatus').textContent = '保存中…';
+  try {
+    const saved = await api(editId ? 'PUT' : 'POST', editId ? `/api/theater/personas/${editId}` : '/api/theater/personas', data);
+    if (!saved?.id || saved.error) throw new Error('保存失败');
+    const idx = personas.findIndex(p => p.id === saved.id);
+    if (idx >= 0) personas[idx] = { ...personas[idx], ...saved };
+    else personas.push(saved);
+    $('personaEditId').value = saved.id;
+    $('personaName').value = saved.name;
+    personaDraft = { name: saved.name, persona: data.persona };
+    renderPersonaList();
+    $('personaSaveStatus').textContent = '已保存';
+    showToast('已保存，可以继续编辑或切换角色');
+  } catch (error) {
+    $('personaSaveStatus').textContent = '保存失败，请重试';
+    showToast('保存失败，修改仍保留在这里');
+  } finally {
+    setPersonaBusy(false);
   }
-  renderPersonaList();
-  closePersonaModal();
-  showToast('已保存');
+}
+
+async function useEditingPersona() {
+  const id = $('personaEditId').value;
+  if (personaBusy || !id || personaHasChanges()) return;
+  setPersonaBusy(true);
+  try {
+    await selectPersona(id);
+    showToast('已用于当前剧场');
+  } catch (error) {
+    showToast('切换角色失败，请重试');
+  } finally {
+    setPersonaBusy(false);
+  }
 }
 
 async function deletePersona(pid) {
+  if (personaBusy || !pid) return;
   if (!confirm('删除这个角色？')) return;
-  await api('DELETE', `/api/theater/personas/${pid}`);
-  personas = personas.filter(p => p.id !== pid);
-  if (currentPersonaId === pid) currentPersonaId = '';
-  renderPersonaList();
+  setPersonaBusy(true);
+  try {
+    const result = await api('DELETE', `/api/theater/personas/${pid}`);
+    if (!result?.ok) throw new Error('删除失败');
+    personas = personas.filter(p => p.id !== pid);
+    if (currentPersonaId === pid) currentPersonaId = '';
+    personaDraft = { name: $('personaName').value, persona: $('personaText').value };
+    $('personaEditId').value = '';
+    setPersonaBusy(false);
+    // Reload the editor even when deleting the final character opens a blank draft.
+    $('personaModalOverlay').classList.remove('show');
+    openPersonaModal(personas[0]?.id || '');
+    showToast('已删除角色');
+  } catch (error) {
+    showToast('删除失败，请重试');
+  } finally {
+    setPersonaBusy(false);
+  }
 }
 
 /* ── 侧栏 ── */
@@ -1876,6 +2005,7 @@ function closeSidebar() {
 
 /* ── 启动 ── */
 </script>
-<script src="/static/theater-studio.js?v=20260913-outline-layout"></script>
+<script src="/static/theater-follow.js?v=20260917-reading-progress"></script>
+<script src="/static/theater-studio.js?v=20260919-page-confirm"></script>
 </body>
 </html>

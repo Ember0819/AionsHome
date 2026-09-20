@@ -3,6 +3,8 @@
 """
 
 import json, time, asyncio, random, re, mimetypes
+from dataclasses import replace
+from functools import wraps
 from typing import Optional, List, Dict
 from pathlib import Path
 from datetime import date
@@ -15,7 +17,7 @@ from pydantic import BaseModel
 from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, ALBUM_IMAGES_DIR, MODELS, SETTINGS, get_sentinel_config, resolve_model_key, resolve_model_transport_mode
 from database import get_db
 from ws import manager
-from generation_control import (cancellable, cancel_generation, generation_status, GenerationQueue, spawn_generation_task)
+from generation_control import (cancellable, cancel_generation, generation_status, GenerationQueue, spawn_generation_task, current_generation)
 from cancelled_reply import save_cancelled_replies
 from active_window_state import record_chatroom_active
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -61,11 +63,11 @@ from stream_safety import (
     StreamSafetyResult,
     consume_safe_stream,
 )
-from safe_live_stream import consume_safe_live_stream
+from safe_live_stream import consume_safe_live_stream, KnownCommandStreamFilter
 from realtime_stream_transport import consume_realtime_transport
 from band_commands import process_band_vibration, with_band_vibration_attachment
 from hug_pillow_commands import process_hug_pillow_commands
-from pat_commands import process_pat_commands
+from capabilities import process_pat_commands
 from app_supervision_ai import (
     queue_app_supervision_reply_command,
     broadcast_app_supervision_command,
@@ -193,31 +195,75 @@ async def _consume_chatroom_realtime_stream(
     transport_mode: str | None = None,
 ):
     mode = transport_mode or resolve_model_transport_mode(model_key)
+    failed_prefix = ""
+
+    async def checked_source():
+        source = source_factory()
+        try:
+            async for chunk in source:
+                # Some providers return errors as text instead of raising.
+                detail = _chatroom_provider_error(chunk)
+                if detail:
+                    raise RuntimeError(detail)
+                yield chunk
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"请求超时：{str(exc) or type(exc).__name__}") from exc
+        finally:
+            if hasattr(source, "aclose"):
+                await source.aclose()
 
     async def safe_consumer(source):
-        return await _consume_safe_chatroom_stream(
+        nonlocal failed_prefix
+        result, visible = await _consume_safe_chatroom_stream(
             source,
             queue,
             chunk_type=chunk_type,
             tts_streamer=tts_streamer,
         )
+        if result.stop_reason:
+            failed_prefix = visible
+        return result, visible
 
     async def legacy_consumer(source):
+        nonlocal failed_prefix
         result = await _consume_chatroom_stream(source, queue, chunk_type=chunk_type)
+        if result.stop_reason and result.committed_text:
+            failed_prefix = result.committed_text
         return result, ""
 
     async def reset_visible():
         reset_type = "connor_reset" if chunk_type == "connor_chunk" else "aion_reset"
         await queue.put({"type": reset_type})
 
-    return await consume_realtime_transport(
+    outcome = await consume_realtime_transport(
         mode=mode,
-        source_factory=source_factory,
+        source_factory=checked_source,
         safe_consumer=safe_consumer,
         legacy_consumer=legacy_consumer,
         reset_visible=reset_visible,
         tts_streamer=tts_streamer,
     )
+    if outcome.result.stop_reason or outcome.manual_retry_required:
+        if tts_streamer:
+            tts_streamer.cancel()
+        # The shared retry transport clears failed output. Keep the received
+        # prefix here so the chatroom can persist it together with the reason.
+        outcome = replace(outcome, result=replace(outcome.result,
+            committed_text=outcome.result.committed_text or failed_prefix))
+    return outcome
+
+
+def _chatroom_provider_error(chunk: str) -> str:
+    text = str(chunk or "").strip()
+    if re.match(r"^\[(?:[^\]\n]*错误|[^\]\n]*error)[^\]\n]*\]", text, re.I):
+        return text
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return ""
+    if isinstance(payload, dict) and payload.get("error"):
+        return text
+    return ""
 
 
 def _done_streaming_response() -> StreamingResponse:
@@ -235,6 +281,88 @@ def _chatroom_msg_from_row(row) -> dict:
     except Exception:
         msg["attachments"] = []
     return msg
+
+
+def _chatroom_reply_failure_text(sender: str, reason: str | None = None) -> str:
+    """Build a short, configured-name notice for a reply that produced no message."""
+    label = _name_for_identity(sender)
+    detail = str(reason or "").strip()
+    lowered = detail.lower()
+    if "timeout" in lowered or "timed out" in lowered or "超时" in detail:
+        if lowered in {"timeout", "request timeout", "idle_timeout", "total_timeout"}:
+            return f"{label} 本次回复超时，请重试。"
+        return f"{label} 本次回复超时：{detail}"
+    if not detail or lowered in {"empty", "empty_response", "no_content"}:
+        return f"{label} 本次没有成功返回回复，请重试。"
+    detail = {"transport": "连接中断", "quality": "返回内容异常，回复已停止",
+              "length": "回复超过长度限制"}.get(lowered, detail)
+    return f"{label} 本次回复失败：{detail}"
+
+
+async def _save_chatroom_reply_failure(
+    room_id: str,
+    sender: str,
+    queue: asyncio.Queue,
+    reason: str | None = None,
+    *,
+    partial_text: str = "",
+    msg_id: str | None = None,
+) -> dict:
+    """Keep a failed reply under its AI sender so it can be regenerated, without TTS."""
+    content = _chatroom_reply_failure_text(sender, reason)
+    partial_text = _visible_chatroom_text(KnownCommandStreamFilter().feed(partial_text)).strip()
+    if partial_text:
+        content = f"{partial_text}\n\n[{content}]"
+    message = await _save_msg(
+        room_id,
+        sender,
+        content,
+        msg_id=msg_id,
+        attachments=[{"type": "chatroom_reply_failure", "sender": sender}],
+        auto_tts=False,
+    )
+    await queue.put({"type": f"{sender}_failed", "content": content, "message": message})
+    return message
+
+
+async def _save_chatroom_generation_failure(room_id: str, queue: asyncio.Queue, error=None) -> dict:
+    """Persist an unexpected request-level failure and its diagnostic."""
+    detail = str(error or "").strip() or (type(error).__name__ if error else "")
+    content = f"本次回复失败：{detail}" if detail else "本次回复失败，请重试。"
+    message = await _save_msg(
+        room_id,
+        "system",
+        content,
+        attachments=[{"type": "chatroom_reply_failure"}],
+        auto_tts=False,
+    )
+    await queue.put({"type": "error", "content": content, "message": message})
+    return message
+
+
+def _chatroom_reply_guard(sender):
+    """Bound prompt preparation too, and let the other participant continue."""
+    def decorate(function):
+        @wraps(function)
+        async def wrapped(room_id, *args, **kwargs):
+            queue = kwargs.get("_q")
+            if queue is None:
+                queue = next(arg for arg in args if isinstance(arg, asyncio.Queue))
+            scope = current_generation()
+            previous_ids = set(scope.partials) if scope else set()
+            try:
+                async with asyncio.timeout(960):
+                    return await function(room_id, *args, **kwargs)
+            except Exception as exc:
+                reason = "timeout" if isinstance(exc, (TimeoutError, httpx.TimeoutException)) else (str(exc) or type(exc).__name__)
+                partial = next((p for key, p in reversed(list(scope.partials.items()))
+                                if key not in previous_ids and p["sender"] == sender
+                                and not p.get("saved")), {}) if scope else {}
+                await _save_chatroom_reply_failure(room_id, sender, queue, reason,
+                    partial_text=partial.get("content", ""), msg_id=partial.get("id"))
+                return kwargs.get("digest_result")
+        return wrapped
+    return decorate
 
 
 def _dedupe_chatroom_attachments(items: list) -> list:
@@ -951,6 +1079,8 @@ async def _process_chatroom_commands(
         triggered["poi"] = poi_matches
 
     # ── 玩具 ──
+    from svakom_ai import process_commands as process_svakom_commands
+    full_text = await process_svakom_commands(full_text, msg_id, room_id=room_id)
     toy_matches = TOY_CMD_PATTERN.findall(full_text)
     if toy_matches:
         full_text = TOY_CMD_PATTERN.sub("", full_text)
@@ -2289,6 +2419,10 @@ class AmbientVoiceListenerRelease(BaseModel):
     client_id: str
 
 
+class MsgUpdate(BaseModel):
+    content: str
+
+
 class MsgEditResend(BaseModel):
     content: str
     model: str = DEFAULT_MODEL
@@ -2909,6 +3043,27 @@ async def delete_message(msg_id: str):
     return {"ok": True}
 
 
+@router.put("/messages/{msg_id}")
+async def update_message(msg_id: str, body: MsgUpdate):
+    """Save an AI text correction without invoking reply/command processing."""
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="内容不能为空")
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM chatroom_messages WHERE id=?", (msg_id,))
+        msg = await cur.fetchone()
+        if not msg:
+            raise HTTPException(status_code=404, detail="消息不存在")
+        if msg["sender"] not in ("aion", "connor"):
+            raise HTTPException(status_code=400, detail="这里只能编辑 AI 回复")
+        await db.execute("UPDATE chatroom_messages SET content=? WHERE id=?", (body.content, msg_id))
+        await db.commit()
+        data = _chatroom_message_dict(msg)
+        data["content"] = body.content
+    await broadcast_synced(manager, {"type": "chatroom_msg_updated", "data": data})
+    return {"ok": True, "message": data}
+
+
 @router.patch("/messages/{msg_id}/feedback")
 async def update_message_feedback(msg_id: str, body: MessageFeedbackUpdate):
     rating = (body.rating or "").strip().lower()
@@ -3016,6 +3171,9 @@ async def _save_msg(
         await db.commit()
     if duplicate_msg:
         return duplicate_msg
+    scope = current_generation()
+    if scope and msg_id in scope.partials:
+        scope.partials[msg_id]["saved"] = True
     msg = {"id": msg_id, "room_id": room_id, "sender": sender, "content": content,
            "created_at": now, "attachments": att_list, "reasoning_content": reasoning_content}
     await broadcast_synced(manager, {"type": "chatroom_msg_created", "data": msg})
@@ -3186,7 +3344,7 @@ async def send_message(room_id: str, body: MsgSend):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            await _q.put({"type": "error", "content": str(e)})
+            await _save_chatroom_generation_failure(room_id, _q, e)
         finally:
             await _q.put({"type": "done"})
 
@@ -3245,7 +3403,7 @@ async def reply_once(room_id: str, body: ReplyOnceTrigger):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            await _q.put({"type": "error", "content": str(e)})
+            await _save_chatroom_generation_failure(room_id, _q, e)
         finally:
             await _q.put({"type": "done"})
 
@@ -3460,7 +3618,7 @@ async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            await _q.put({"type": "error", "content": str(e)})
+            await _save_chatroom_generation_failure(room_id, _q, e)
         finally:
             await _q.put({"type": "done"})
 
@@ -3532,7 +3690,7 @@ async def regenerate_chatroom_message(msg_id: str, body: MsgRegenerate):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            await _q.put({"type": "error", "content": str(e)})
+            await _save_chatroom_generation_failure(room_id, _q, e)
         finally:
             await _q.put({"type": "done"})
 
@@ -3548,6 +3706,7 @@ async def regenerate_chatroom_message(msg_id: str, body: MsgRegenerate):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+@_chatroom_reply_guard("connor")
 async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, connor_model_key="Codex", tts_enabled=False, tts_connor_voice="", whisper_mode=False):
     """Connor 单聊回复（Codex CLI 流式调用）"""
     connor_label = _name_for_identity("connor")
@@ -3583,7 +3742,10 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
 
     async def content_stream():
         nonlocal has_reply
+        usage_meta.pop("provider_error", None)
         async for chunk in _stream_connor_model(connor_messages, connor_model_key, usage_meta):
+            if usage_meta.get("provider_error"):
+                raise RuntimeError(usage_meta["provider_error"])
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "connor_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
@@ -3598,8 +3760,15 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
         tts_streamer=live_tts,
         transport_mode=transport_mode,
     )
-    if transport_outcome.manual_retry_required:
-        await _q.put({"type": "connor_failed", "content": "回复连接异常，可重试"})
+    if transport_outcome.manual_retry_required or transport_outcome.result.stop_reason:
+        await _save_chatroom_reply_failure(
+            room_id,
+            "connor",
+            _q,
+            transport_outcome.result.diagnostic_error or transport_outcome.result.stop_reason,
+            partial_text=transport_outcome.result.committed_text,
+            msg_id=connor_msg_id,
+        )
         return
     stream_result = transport_outcome.result
     full_text = stream_result.committed_text
@@ -3610,7 +3779,8 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
 
     full_text = full_text.strip()
     if not full_text:
-        full_text = f"{connor_label} 暂时无法回复，请稍后再试。"
+        await _save_chatroom_reply_failure(room_id, "connor", _q, error_text or "empty_response", msg_id=connor_msg_id)
+        return
 
     # 工具指令处理（从文本中剥离并执行，与群聊保持一致）
     try:
@@ -3743,6 +3913,7 @@ async def _generate_group_replies(room_id, room, msgs, model_key, connor_model_k
                           tts_enabled=tts_enabled, tts_voice=tts_aion_voice, digest_result=digest, whisper_mode=whisper_mode)
 
 
+@_chatroom_reply_guard("aion")
 async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *, tts_enabled=False, tts_voice="", digest_result=None, whisper_mode=False, ambient_context: str = ""):
     ai_label = _name_for_identity("aion")
     aion_history, digest_out = await build_aion_group_context(
@@ -3774,7 +3945,10 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
         )
 
     async def content_stream():
+        usage_meta.pop("provider_error", None)
         async for chunk in stream_ai(aion_history, model_key, usage_meta):
+            if usage_meta.get("provider_error"):
+                raise RuntimeError(usage_meta["provider_error"])
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "aion_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
@@ -3788,8 +3962,15 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
         tts_streamer=live_tts,
         transport_mode=transport_mode,
     )
-    if transport_outcome.manual_retry_required:
-        await _q.put({"type": "aion_failed", "content": "回复连接异常，可重试"})
+    if transport_outcome.manual_retry_required or transport_outcome.result.stop_reason:
+        await _save_chatroom_reply_failure(
+            room_id,
+            "aion",
+            _q,
+            transport_outcome.result.diagnostic_error or transport_outcome.result.stop_reason,
+            partial_text=transport_outcome.result.committed_text,
+            msg_id=aion_msg_id,
+        )
         return digest_out
     stream_result = transport_outcome.result
     full_text = stream_result.committed_text
@@ -3797,6 +3978,10 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
     has_error = stream_result.stop_reason is not None
     error_text = stream_result.diagnostic_error or stream_result.stop_reason
     tts_from_model = bool(full_text)
+
+    if not full_text.strip():
+        await _save_chatroom_reply_failure(room_id, "aion", _q, error_text or "empty_response", msg_id=aion_msg_id)
+        return digest_out
 
     # 工具指令处理（从文本中剥离并执行）
     try:
@@ -3858,6 +4043,7 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
     return digest_out
 
 
+@_chatroom_reply_guard("connor")
 async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_model_key="Codex", tts_enabled=False, tts_voice="", digest_result=None, whisper_mode=False, ambient_context: str = ""):
     connor_label = _name_for_identity("connor")
     connor_history, digest_out = await build_connor_group_context(
@@ -3889,7 +4075,10 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
         )
 
     async def content_stream():
+        usage_meta.pop("provider_error", None)
         async for chunk in _stream_connor_model(connor_history, connor_model_key, usage_meta):
+            if usage_meta.get("provider_error"):
+                raise RuntimeError(usage_meta["provider_error"])
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "connor_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
@@ -3903,8 +4092,15 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
         tts_streamer=live_tts,
         transport_mode=transport_mode,
     )
-    if transport_outcome.manual_retry_required:
-        await _q.put({"type": "connor_failed", "content": "回复连接异常，可重试"})
+    if transport_outcome.manual_retry_required or transport_outcome.result.stop_reason:
+        await _save_chatroom_reply_failure(
+            room_id,
+            "connor",
+            _q,
+            transport_outcome.result.diagnostic_error or transport_outcome.result.stop_reason,
+            partial_text=transport_outcome.result.committed_text,
+            msg_id=connor_msg_id,
+        )
         return digest_out
     stream_result = transport_outcome.result
     full_text = stream_result.committed_text
@@ -3915,7 +4111,8 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
 
     full_text = full_text.strip()
     if not full_text:
-        full_text = f"{connor_label} 暂时无法回复，请稍后再试。"
+        await _save_chatroom_reply_failure(room_id, "connor", _q, error_text or "empty_response", msg_id=connor_msg_id)
+        return digest_out
 
     # 工具指令处理
     try:
@@ -4053,7 +4250,7 @@ async def trigger_ai_chat(room_id: str, body: AiChatTrigger):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            await _q.put({"type": "error", "content": str(e)})
+            await _save_chatroom_generation_failure(room_id, _q, e)
         finally:
             await _q.put({"type": "done"})
 

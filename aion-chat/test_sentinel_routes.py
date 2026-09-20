@@ -70,6 +70,33 @@ class SentinelRouteConfigTests(unittest.TestCase):
 
 
 class SentinelLunaDispatchTests(unittest.TestCase):
+    def test_image_status_is_replaced_before_waiting_for_chat_model(self):
+        prepared = [{"role": "user", "content": "[图片内容：午饭]"}]
+
+        async def provider(*args):
+            yield "回复正文"
+
+        async def collect():
+            return [chunk async for chunk in ai_providers.stream_ai(
+                [{"role": "user", "content": "吃完了"}],
+                "unit-non-vision", include_device_context=False,
+            )]
+
+        with (
+            patch.dict(ai_providers.MODELS, {"unit-non-vision": {
+                "provider": "custom_openai", "model": "unit-model", "vision": False,
+            }}),
+            patch.object(ai_providers, "_messages_have_images", return_value=True),
+            patch.object(ai_providers, "_sentinel_describe_images", AsyncMock(return_value=prepared)),
+            patch.object(ai_providers, "call_custom_openai", provider),
+        ):
+            chunks = asyncio.run(collect())
+
+        self.assertIn("识别图片", chunks[0])
+        self.assertTrue(chunks[1].startswith(ai_providers.CLI_STATUS_PREFIX))
+        self.assertIn("等待模型回复", chunks[1])
+        self.assertEqual(chunks[-1], "回复正文")
+
     def test_vision_call_dispatches_to_codex_luna(self):
         call = AsyncMock(return_value='{"call_core": false}')
         sentinel = {

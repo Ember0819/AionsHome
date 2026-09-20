@@ -42,7 +42,7 @@ _BASE64_TOKEN = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{320,}={0,2}(?![A-Za
 _BRACKET_COMMAND_PREFIXES = tuple(value.upper() for value in (
     "[WEB_SEARCH", "[WEB_EXTRACT", "[LOUNGE_VISIT", "[MUSIC", "[MOMENT",
     "[MEMORY", "[许愿", "[查看动态", "[SELFIE", "[DRAW", "[SONG",
-    "[POI_SEARCH", "[TOY", "[PET", "[HOME", "[BAND_VIBRATE", "[BAND_NOTE",
+    "[POI_SEARCH", "[TOY", "[SVAKOM", "[PET", "[HOME", "[BAND_VIBRATE", "[BAND_NOTE",
     "[LUCKIN", "[转账", "[悄悄话", "[WECHAT", "[ALARM", "[REMINDER",
     "[MONITOR", "[SCHEDULE_DEL", "[SCHEDULE_LIST", "[NEXT_CHAT", "[HEART",
     "[视频电话", "[CAM_CHECK", "[微信消息", "[拍拍抱枕", "[剧场属性", "[剧场道具",
@@ -56,7 +56,7 @@ _LONG_FORM_BRACKET_PREFIXES = (
     "[MEMORY", "[许愿", "[SELFIE", "[DRAW", "[POI_SEARCH", "[BAND_NOTE",
     "[LUCKIN", "[悄悄话", "[WECHAT", "[ALARM", "[REMINDER", "[MONITOR",
     "[HEART", "[微信消息", "[拍拍抱枕", "[HOME", "[APP_", "[DEVICE_",
-    "[DATE_", "[COME_HOME", "[LOOK_AT_ME",
+    "[DATE_", "[COME_HOME", "[LOOK_AT_ME", "[SVAKOM",
 )
 
 
@@ -159,6 +159,7 @@ class KnownCommandStreamFilter:
     def __init__(self):
         self._pending = ""
         self._close_token = ""
+        self._memory_search = False
         self._active_chars = 0
         self._active_tail = ""
         self._active_limit = SAFE_LIVE_MAX_PENDING_COMMAND_CHARS
@@ -176,10 +177,20 @@ class KnownCommandStreamFilter:
 
     @staticmethod
     def _find_start(text: str) -> int:
-        positions = [pos for token in ("[", "【", "<") if (pos := text.find(token)) >= 0]
+        positions = [pos for token in ("[", "［", "【", "<") if (pos := text.find(token)) >= 0]
         return min(positions) if positions else -1
 
     def _start_if_known_or_partial(self, candidate: str) -> tuple[bool, bool]:
+        # Match the memory parser's bracket/colon variants before the generic
+        # [MEMORY prefix can claim the tag and require an ASCII closing bracket.
+        if re.match(r"^[\[［【]\s*MEMORY_SEARCH\s*[:：]", candidate, re.I):
+            self._memory_search = True
+            self._close_token = "]"
+            self._active_limit = SAFE_LIVE_MAX_LONG_COMMAND_CHARS
+            return True, False
+        memory_prefix = re.fullmatch(r"[\[［【]\s*([A-Za-z_]*)\s*", candidate)
+        if memory_prefix and "MEMORY_SEARCH".startswith(memory_prefix.group(1).upper()):
+            return False, True
         upper = candidate.upper()
         prefixes = self._prefixes_for(candidate[0])
         matched_prefix = next((prefix for prefix in prefixes if upper.startswith(prefix)), "")
@@ -217,7 +228,11 @@ class KnownCommandStreamFilter:
             if self._close_token:
                 active_buf = self._active_tail + buf
                 upper = active_buf.upper()
-                end = upper.find(self._close_token)
+                if self._memory_search:
+                    closing = re.search(r"[\]］】]", active_buf)
+                    end = closing.start() if closing else -1
+                else:
+                    end = upper.find(self._close_token)
                 if end < 0:
                     tail_chars = min(len(active_buf), len(self._close_token) - 1)
                     consumed_chars = len(active_buf) - tail_chars
@@ -232,6 +247,7 @@ class KnownCommandStreamFilter:
                     return "".join(out)
                 buf = active_buf[consumed:]
                 self._close_token = ""
+                self._memory_search = False
                 self._active_chars = 0
                 self._active_tail = ""
                 self._active_limit = SAFE_LIVE_MAX_PENDING_COMMAND_CHARS
